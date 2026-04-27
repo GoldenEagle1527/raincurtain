@@ -6,10 +6,127 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:http/http.dart' as http;
+import 'package:http_parser/http_parser.dart' as http_parser;
 import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
 import '../models/plugin_manager.dart';
 import '../models/plugin_data_manager.dart';
+
+/// 网络请求性能指标
+class _FetchMetrics {
+  final DateTime startTime;
+  final String url;
+  final String method;
+  int? statusCode;
+  int? responseSize;
+  String? error;
+  
+  _FetchMetrics({
+    required this.url,
+    required this.method,
+  }) : startTime = DateTime.now();
+  
+  Duration get duration => DateTime.now().difference(startTime);
+  
+  void complete(int status, int size) {
+    statusCode = status;
+    responseSize = size;
+  }
+  
+  void fail(String err) {
+    error = err;
+  }
+  
+  void log() {
+    if (error != null) {
+      debugPrint('[RainCurtain Fetch] ❌ $method $url\n  Error: $error\n  Duration: ${duration.inMilliseconds}ms');
+    } else {
+      debugPrint('[RainCurtain Fetch] ✅ $method $url\n  Status: $statusCode\n  Size: ${responseSize ?? 0} bytes\n  Duration: ${duration.inMilliseconds}ms');
+    }
+  }
+}
+
+/// HTTP 响应缓存条目
+class _CachedResponse {
+  final int statusCode;
+  final String? reasonPhrase;
+  final Map<String, String> headers;
+  final Uint8List bodyBytes;
+  final DateTime cachedAt;
+  final Duration maxAge;
+
+  _CachedResponse({
+    required this.statusCode,
+    required this.reasonPhrase,
+    required this.headers,
+    required this.bodyBytes,
+    required this.maxAge,
+  }) : cachedAt = DateTime.now();
+
+  bool get isExpired => DateTime.now().difference(cachedAt) > maxAge;
+
+  /// 从响应头解析 max-age，默认 60 秒
+  static Duration _parseMaxAge(Map<String, String> headers) {
+    final cc = headers['cache-control'] ?? headers['Cache-Control'] ?? '';
+    final match = RegExp(r'max-age=(\d+)').firstMatch(cc);
+    if (match != null) {
+      final seconds = int.tryParse(match.group(1) ?? '');
+      if (seconds != null && seconds > 0) {
+        return Duration(seconds: seconds);
+      }
+    }
+    // no-store / no-cache → don't cache
+    if (cc.contains('no-store') || cc.contains('no-cache')) {
+      return Duration.zero;
+    }
+    return const Duration(seconds: 60);
+  }
+
+  static _CachedResponse? fromResponse(http.Response response) {
+    final headers = response.headers;
+    final maxAge = _parseMaxAge(headers);
+    if (maxAge == Duration.zero) return null; // not cacheable
+    return _CachedResponse(
+      statusCode: response.statusCode,
+      reasonPhrase: response.reasonPhrase,
+      headers: headers,
+      bodyBytes: response.bodyBytes,
+      maxAge: maxAge,
+    );
+  }
+}
+
+/// LRU 请求缓存（仅缓存 GET 请求）
+class _RequestCache {
+  static const int _maxEntries = 50;
+  // LinkedHashMap preserves insertion order; we remove the oldest entry on overflow
+  final LinkedHashMap<String, _CachedResponse> _store =
+      LinkedHashMap<String, _CachedResponse>();
+
+  _CachedResponse? get(String key) {
+    final entry = _store[key];
+    if (entry == null) return null;
+    if (entry.isExpired) {
+      _store.remove(key);
+      return null;
+    }
+    // Move to end (most-recently-used)
+    _store.remove(key);
+    _store[key] = entry;
+    return entry;
+  }
+
+  void put(String key, _CachedResponse entry) {
+    _store.remove(key); // reset position
+    if (_store.length >= _maxEntries) {
+      _store.remove(_store.keys.first); // evict LRU
+    }
+    _store[key] = entry;
+  }
+
+  void clear() => _store.clear();
+}
 
 /// 插件 WebView 视图
 /// 加载并显示插件的 Web 内容
@@ -33,6 +150,15 @@ class PluginWebViewState extends State<PluginWebView> {
   String? errorMessage;
   int _notifId = 0;
   ThemeData? _currentTheme;
+  
+  // 网络请求管理：支持请求取消
+  final Map<String, http.Client> _activeRequests = {};
+  
+  // 性能监控：记录请求指标
+  final Map<String, _FetchMetrics> _requestMetrics = {};
+
+  // GET 请求缓存（LRU，最多 50 条，按 Cache-Control 设置 TTL）
+  final _RequestCache _requestCache = _RequestCache();
 
   @override
   void initState() {
@@ -593,6 +719,507 @@ class PluginWebViewState extends State<PluginWebView> {
 })();
 """;
 
+  /// 注入 JS：拦截跨域 fetch/XMLHttpRequest，请求改由 Flutter 侧发起
+  static const String _fetchPolyfillJS = r"""
+(function() {
+  if (window.__raincurtainFetchPatched) return;
+  window.__raincurtainFetchPatched = true;
+
+  var originalFetch = window.fetch ? window.fetch.bind(window) : null;
+  var OriginalXHR = window.XMLHttpRequest;
+  var localhostOrigin = 'http://localhost:8080';
+
+  // 生成唯一请求 ID (简化版 UUID v4)
+  function generateRequestId() {
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+      var r = Math.random() * 16 | 0;
+      var v = c === 'x' ? r : (r & 0x3 | 0x8);
+      return v.toString(16);
+    });
+  }
+
+  function isLocalRequest(url) {
+    if (!url) return true;
+    if (url.indexOf('data:') === 0 || url.indexOf('blob:') === 0) return true;
+    if (url.indexOf('/') === 0) return true;
+    if (url.indexOf(localhostOrigin) === 0) return true;
+    try {
+      var resolved = new URL(url, window.location.href);
+      return resolved.origin === window.location.origin;
+    } catch (_) {
+      return true;
+    }
+  }
+
+  function headersToObject(headers) {
+    var result = {};
+    if (!headers) return result;
+
+    if (typeof Headers !== 'undefined' && headers instanceof Headers) {
+      headers.forEach(function(value, key) {
+        result[key] = value;
+      });
+      return result;
+    }
+
+    if (Array.isArray(headers)) {
+      headers.forEach(function(entry) {
+        if (Array.isArray(entry) && entry.length >= 2) {
+          result[String(entry[0])] = String(entry[1]);
+        }
+      });
+      return result;
+    }
+
+    Object.keys(headers).forEach(function(key) {
+      result[key] = String(headers[key]);
+    });
+    return result;
+  }
+
+  // 将 File/Blob 转为 base64 字符串（不含 data-URL 前缀）
+  function blobToBase64(blob) {
+    return new Promise(function(resolve, reject) {
+      var reader = new FileReader();
+      reader.onloadend = function() {
+        var result = reader.result || '';
+        var commaIndex = result.indexOf(',');
+        resolve(commaIndex >= 0 ? result.substring(commaIndex + 1) : '');
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  function arrayBufferToBase64(buffer) {
+    var bytes = new Uint8Array(buffer);
+    var binary = '';
+    var chunkSize = 0x8000;
+    for (var i = 0; i < bytes.length; i += chunkSize) {
+      var chunk = bytes.subarray(i, i + chunkSize);
+      binary += String.fromCharCode.apply(null, chunk);
+    }
+    return btoa(binary);
+  }
+
+  function base64ToUint8Array(base64) {
+    var binary = atob(base64 || '');
+    var bytes = new Uint8Array(binary.length);
+    for (var i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return bytes;
+  }
+
+  // 规范化请求体：支持 File/Blob 作为 multipart 字段
+  async function normalizeBody(body) {
+    if (body == null) return null;
+    if (typeof body === 'string') {
+      return { kind: 'text', data: body };
+    }
+    if (typeof URLSearchParams !== 'undefined' && body instanceof URLSearchParams) {
+      return { kind: 'text', data: body.toString() };
+    }
+    if (typeof FormData !== 'undefined' && body instanceof FormData) {
+      var entries = [];
+      var filePromises = [];
+      body.forEach(function(value, key) {
+        if (typeof File !== 'undefined' && value instanceof File) {
+          var idx = entries.length;
+          entries.push({ key: key, type: 'file', filename: value.name, contentType: value.type || 'application/octet-stream', data: null });
+          filePromises.push(
+            blobToBase64(value).then(function(b64) { entries[idx].data = b64; })
+          );
+        } else if (typeof Blob !== 'undefined' && value instanceof Blob) {
+          var idx2 = entries.length;
+          entries.push({ key: key, type: 'file', filename: 'blob', contentType: value.type || 'application/octet-stream', data: null });
+          filePromises.push(
+            blobToBase64(value).then(function(b64) { entries[idx2].data = b64; })
+          );
+        } else {
+          entries.push({ key: key, type: 'text', data: String(value) });
+        }
+      });
+      if (filePromises.length > 0) {
+        await Promise.all(filePromises);
+      }
+      return { kind: 'form-data', data: JSON.stringify(entries) };
+    }
+    if (typeof Blob !== 'undefined' && body instanceof Blob) {
+      return { kind: 'base64', data: await blobToBase64(body) };
+    }
+    if (typeof ArrayBuffer !== 'undefined' && body instanceof ArrayBuffer) {
+      return { kind: 'base64', data: arrayBufferToBase64(body) };
+    }
+    if (typeof ArrayBuffer !== 'undefined' && ArrayBuffer.isView && ArrayBuffer.isView(body)) {
+      return {
+        kind: 'base64',
+        data: arrayBufferToBase64(body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength)),
+      };
+    }
+    return { kind: 'text', data: String(body) };
+  }
+
+  function buildResponse(result, url) {
+    var headers = new Headers(result.headers || {});
+    var body = result.bodyBase64 != null
+      ? base64ToUint8Array(result.bodyBase64)
+      : (result.bodyText || '');
+    var response = new Response(body, {
+      status: result.status,
+      statusText: result.statusText || '',
+      headers: headers,
+    });
+    try {
+      Object.defineProperty(response, 'url', {
+        value: url,
+        configurable: true,
+      });
+    } catch (_) {}
+    return response;
+  }
+
+  // 构建一个流式 Response，Flutter 通过 window.__rc_stream_<id> 推送数据块
+  function buildStreamingResponse(meta, url, requestId) {
+    var responseHeaders = new Headers(meta.headers || {});
+    var streamController;
+    var stream = new ReadableStream({
+      start: function(controller) {
+        streamController = controller;
+        // 注册全局回调，Flutter 通过 evaluateJavascript 调用
+        window['__rc_stream_chunk_' + requestId] = function(base64Chunk) {
+          try {
+            controller.enqueue(base64ToUint8Array(base64Chunk));
+          } catch (_) {}
+        };
+        window['__rc_stream_done_' + requestId] = function() {
+          try { controller.close(); } catch (_) {}
+          delete window['__rc_stream_chunk_' + requestId];
+          delete window['__rc_stream_done_' + requestId];
+          delete window['__rc_stream_error_' + requestId];
+        };
+        window['__rc_stream_error_' + requestId] = function(msg) {
+          try { controller.error(new TypeError(msg)); } catch (_) {}
+          delete window['__rc_stream_chunk_' + requestId];
+          delete window['__rc_stream_done_' + requestId];
+          delete window['__rc_stream_error_' + requestId];
+        };
+      },
+      cancel: function() {
+        // User cancelled the reader — abort the Flutter-side request
+        window.flutter_inappwebview && window.flutter_inappwebview.callHandler('raincurtain_abort', { requestId: requestId }).catch(function(){});
+        delete window['__rc_stream_chunk_' + requestId];
+        delete window['__rc_stream_done_' + requestId];
+        delete window['__rc_stream_error_' + requestId];
+      },
+    });
+
+    var response = new Response(stream, {
+      status: meta.status,
+      statusText: meta.statusText || '',
+      headers: responseHeaders,
+    });
+    try {
+      Object.defineProperty(response, 'url', { value: url, configurable: true });
+    } catch (_) {}
+    return response;
+  }
+
+  async function interceptedFetch(resource, init) {
+    var request = resource instanceof Request ? resource : null;
+    var url = request ? request.url : String(resource);
+
+    if (isLocalRequest(url) || !window.flutter_inappwebview) {
+      if (!originalFetch) {
+        throw new Error('Native fetch is unavailable');
+      }
+      return originalFetch(resource, init);
+    }
+
+    var method = 'GET';
+    var headers = {};
+    var body = null;
+    var signal = null;
+
+    if (request) {
+      method = request.method || method;
+      headers = headersToObject(request.headers);
+      signal = request.signal;
+      if (!init || init.body === undefined) {
+        body = await normalizeBody(await request.clone().arrayBuffer());
+      }
+    }
+
+    if (init) {
+      if (init.method) method = init.method;
+      if (init.headers) headers = headersToObject(init.headers);
+      if (init.body !== undefined) body = await normalizeBody(init.body);
+      if (init.signal) signal = init.signal;
+    }
+
+    // 生成请求 ID 用于取消
+    var requestId = generateRequestId();
+
+    // 如果有 AbortSignal，监听取消事件
+    if (signal) {
+      if (signal.aborted) {
+        throw new DOMException('The operation was aborted.', 'AbortError');
+      }
+      signal.addEventListener('abort', function() {
+        window.flutter_inappwebview.callHandler('raincurtain_abort', {
+          requestId: requestId,
+        }).catch(function(e) {
+          console.warn('Failed to abort request:', e);
+        });
+      });
+    }
+
+    // 判断是否请求流式响应：Accept 含 text/event-stream 或显式 rc-stream 头
+    var wantsStream = (headers['accept'] || headers['Accept'] || '').indexOf('text/event-stream') >= 0
+      || headers['x-rc-stream'] === '1';
+
+    var result = await window.flutter_inappwebview.callHandler('raincurtain_fetch', {
+      requestId: requestId,
+      url: url,
+      method: method,
+      headers: headers,
+      body: body,
+      stream: wantsStream,
+    });
+
+    if (!result || result.ok !== true) {
+      throw new TypeError((result && result.error) || 'Network request failed');
+    }
+
+    // 如果 Flutter 确认以流式方式响应
+    if (result.streaming) {
+      return buildStreamingResponse(result, url, requestId);
+    }
+
+    return buildResponse(result, url);
+  }
+
+  if (originalFetch) {
+    window.fetch = function(resource, init) {
+      return interceptedFetch(resource, init);
+    };
+  }
+
+  if (OriginalXHR) {
+    function RainCurtainXHR() {
+      this._nativeXhr = new OriginalXHR();
+      this._method = 'GET';
+      this._url = '';
+      this._async = true;
+      this._headers = {};
+      this._body = null;
+      this._intercept = false;
+      this._responseHeaders = {};
+      this.readyState = 0;
+      this.status = 0;
+      this.statusText = '';
+      this.response = null;
+      this.responseText = '';
+      this.responseType = '';
+      this.timeout = 0;
+      this.withCredentials = false;
+      this.onreadystatechange = null;
+      this.onload = null;
+      this.onerror = null;
+      this.onabort = null;
+      this.ontimeout = null;
+      this.onloadend = null;
+      this.onprogress = null;
+      this._bindNativeEvents();
+    }
+
+    RainCurtainXHR.UNSENT = 0;
+    RainCurtainXHR.OPENED = 1;
+    RainCurtainXHR.HEADERS_RECEIVED = 2;
+    RainCurtainXHR.LOADING = 3;
+    RainCurtainXHR.DONE = 4;
+
+    RainCurtainXHR.prototype._bindNativeEvents = function() {
+      var self = this;
+      var nativeXhr = this._nativeXhr;
+      nativeXhr.onreadystatechange = function() {
+        if (self._intercept) return;
+        self.readyState = nativeXhr.readyState;
+        if (nativeXhr.readyState >= 2) {
+          self.status = nativeXhr.status;
+          self.statusText = nativeXhr.statusText;
+        }
+        if (nativeXhr.readyState === 4) {
+          self.response = nativeXhr.response;
+          self.responseText = nativeXhr.responseText;
+        }
+        self._emit('readystatechange');
+      };
+      nativeXhr.onload = function(event) {
+        if (self._intercept) return;
+        self._emit('load', event);
+        self._emit('loadend', event);
+      };
+      nativeXhr.onerror = function(event) {
+        if (self._intercept) return;
+        self._emit('error', event);
+        self._emit('loadend', event);
+      };
+      nativeXhr.onabort = function(event) {
+        if (self._intercept) return;
+        self._emit('abort', event);
+        self._emit('loadend', event);
+      };
+      nativeXhr.ontimeout = function(event) {
+        if (self._intercept) return;
+        self._emit('timeout', event);
+        self._emit('loadend', event);
+      };
+      nativeXhr.onprogress = function(event) {
+        if (self._intercept) return;
+        self._emit('progress', event);
+      };
+    };
+
+    RainCurtainXHR.prototype._emit = function(type, event) {
+      var handler = this['on' + type];
+      if (typeof handler === 'function') {
+        handler.call(this, event);
+      }
+    };
+
+    RainCurtainXHR.prototype.open = function(method, url, async, user, password) {
+      this._method = method || 'GET';
+      this._url = String(url);
+      this._async = async !== false;
+      this._intercept = !isLocalRequest(this._url) && !!window.flutter_inappwebview;
+      this.readyState = 1;
+      this._emit('readystatechange');
+      if (!this._intercept) {
+        this._nativeXhr.open(method, url, async, user, password);
+      }
+    };
+
+    RainCurtainXHR.prototype.setRequestHeader = function(name, value) {
+      this._headers[name] = String(value);
+      if (!this._intercept) {
+        this._nativeXhr.setRequestHeader(name, value);
+      }
+    };
+
+    RainCurtainXHR.prototype.getAllResponseHeaders = function() {
+      if (!this._intercept) {
+        return this._nativeXhr.getAllResponseHeaders();
+      }
+      return Object.keys(this._responseHeaders).map(function(key) {
+        return key + ': ' + String(this._responseHeaders[key]);
+      }, this).join('\r\n');
+    };
+
+    RainCurtainXHR.prototype.getResponseHeader = function(name) {
+      if (!this._intercept) {
+        return this._nativeXhr.getResponseHeader(name);
+      }
+      var lowerName = String(name).toLowerCase();
+      var keys = Object.keys(this._responseHeaders);
+      for (var i = 0; i < keys.length; i++) {
+        if (keys[i].toLowerCase() === lowerName) {
+          return String(this._responseHeaders[keys[i]]);
+        }
+      }
+      return null;
+    };
+
+    RainCurtainXHR.prototype.abort = function() {
+      if (!this._intercept) {
+        return this._nativeXhr.abort();
+      }
+      this.readyState = 4;
+      this._emit('abort');
+      this._emit('loadend');
+    };
+
+    RainCurtainXHR.prototype.overrideMimeType = function(mime) {
+      if (!this._intercept && this._nativeXhr.overrideMimeType) {
+        this._nativeXhr.overrideMimeType(mime);
+      }
+    };
+
+    RainCurtainXHR.prototype.send = async function(body) {
+      if (!this._intercept) {
+        this._nativeXhr.responseType = this.responseType;
+        this._nativeXhr.timeout = this.timeout;
+        this._nativeXhr.withCredentials = this.withCredentials;
+        return this._nativeXhr.send(body);
+      }
+
+      try {
+        this._body = await normalizeBody(body);
+        var result = await window.flutter_inappwebview.callHandler('raincurtain_fetch', {
+          url: this._url,
+          method: this._method,
+          headers: this._headers,
+          body: this._body,
+          stream: false,
+        });
+
+        if (!result || result.ok !== true) {
+          throw new Error((result && result.error) || 'Network request failed');
+        }
+
+        this.status = result.status;
+        this.statusText = result.statusText || '';
+        this._responseHeaders = result.headers || {};
+        this.readyState = 2;
+        this._emit('readystatechange');
+        this.readyState = 3;
+        this._emit('readystatechange');
+
+        if (this.responseType === 'arraybuffer' || this.responseType === 'blob') {
+          var bytes = base64ToUint8Array(result.bodyBase64 || '');
+          this.response = this.responseType === 'blob' ? new Blob([bytes]) : bytes.buffer;
+          this.responseText = '';
+        } else {
+          this.responseText = result.bodyText || '';
+          this.response = this.responseText;
+        }
+
+        this.readyState = 4;
+        this._emit('readystatechange');
+        this._emit('load');
+        this._emit('loadend');
+      } catch (error) {
+        this.readyState = 4;
+        this.status = 0;
+        this.statusText = '';
+        this.response = null;
+        this.responseText = '';
+        this._emit('readystatechange');
+        this._emit('error', error);
+        this._emit('loadend', error);
+      }
+    };
+
+    Object.defineProperty(RainCurtainXHR.prototype, 'responseURL', {
+      get: function() {
+        return this._url;
+      },
+    });
+
+    window.XMLHttpRequest = RainCurtainXHR;
+  }
+})();
+""";
+
+  /// 解析 MIME 类型字符串为 MediaType（仅用于 multipart 文件上传）
+  http_parser.MediaType _parseMediaType(String contentType) {
+    try {
+      return http_parser.MediaType.parse(contentType);
+    } catch (_) {
+      return http_parser.MediaType('application', 'octet-stream');
+    }
+  }
+
   /// 处理 WebView 触发的下载请求
   /// 支持 data: URI（base64 内联数据）和普通 http/https URL
   Future<void> _handleDownload({
@@ -689,6 +1316,11 @@ class PluginWebViewState extends State<PluginWebView> {
             // 注入 LocalStorage 拦截脚本
             UserScript(
               source: _localStoragePolyfillJS,
+              injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
+            ),
+            // 注入网络请求拦截脚本，跨域请求改由 Flutter 侧发起
+            UserScript(
+              source: _fetchPolyfillJS,
               injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
             ),
             // Windows 平台注入滚动修复脚本，解决 WebView2 滚轮事件问题
@@ -817,6 +1449,272 @@ class PluginWebViewState extends State<PluginWebView> {
                   }
                 } catch (e) {
                   debugPrint('LocalStorage handler error: $e');
+                }
+                
+                return null;
+              },
+            );
+
+            // 注册 JS Handler：接收来自 WebView 的跨域网络请求，由 Flutter 侧发起
+            controller.addJavaScriptHandler(
+              handlerName: 'raincurtain_fetch',
+              callback: (args) async {
+                if (args.isEmpty) {
+                  return {
+                    'ok': false,
+                    'error': 'Missing request payload',
+                  };
+                }
+
+                // 提取请求 ID
+                final data = args[0] as Map<dynamic, dynamic>;
+                final requestId = data['requestId'] as String?;
+                final wantsStream = data['stream'] == true;
+                
+                // 创建性能指标
+                final url = (data['url'] as String? ?? '').trim();
+                final method = (data['method'] as String? ?? 'GET').toUpperCase();
+                final metrics = _FetchMetrics(url: url, method: method);
+                if (requestId != null) {
+                  _requestMetrics[requestId] = metrics;
+                }
+
+                try {
+                  if (url.isEmpty) {
+                    metrics.fail('Missing request url');
+                    metrics.log();
+                    return {
+                      'ok': false,
+                      'error': 'Missing request url',
+                    };
+                  }
+
+                  final rawHeaders = data['headers'];
+                  final headers = <String, String>{};
+                  if (rawHeaders is Map) {
+                    rawHeaders.forEach((key, value) {
+                      headers[key.toString()] = value.toString();
+                    });
+                  }
+
+                  // ── 构建请求体 ──────────────────────────────────────────
+                  final rawBody = data['body'];
+                  final uri = Uri.parse(url);
+                  http.BaseRequest request;
+
+                  if (rawBody is Map) {
+                    final bodyMap = Map<dynamic, dynamic>.from(rawBody);
+                    final kind = (bodyMap['kind'] as String? ?? 'text').trim();
+                    final payload = bodyMap['data'];
+
+                    if (kind == 'form-data') {
+                      // FormData entries: [{key, type, data, filename?, contentType?}]
+                      final entries = jsonDecode((payload as String?) ?? '[]');
+                      final multipart = http.MultipartRequest(method, uri);
+                      multipart.headers.addAll(headers);
+                      if (entries is List) {
+                        for (final entry in entries) {
+                          if (entry is! Map) continue;
+                          final key = entry['key']?.toString() ?? '';
+                          final type = entry['type']?.toString() ?? 'text';
+                          if (type == 'file') {
+                            // File field encoded as base64
+                            final b64 = entry['data']?.toString() ?? '';
+                            final bytes = base64Decode(b64);
+                            final filename = entry['filename']?.toString() ?? 'file';
+                            final contentType = entry['contentType']?.toString() ?? 'application/octet-stream';
+                            multipart.files.add(http.MultipartFile.fromBytes(
+                              key,
+                              bytes,
+                              filename: filename,
+                              contentType: _parseMediaType(contentType),
+                            ));
+                          } else {
+                            // Text field
+                            multipart.fields[key] = entry['data']?.toString() ?? '';
+                          }
+                        }
+                      }
+                      request = multipart;
+                    } else {
+                      // Plain request
+                      final plainRequest = http.Request(method, uri);
+                      plainRequest.headers.addAll(headers);
+                      switch (kind) {
+                        case 'base64':
+                          plainRequest.bodyBytes = base64Decode((payload as String?) ?? '');
+                          break;
+                        case 'text':
+                        default:
+                          plainRequest.body = payload?.toString() ?? '';
+                          break;
+                      }
+                      request = plainRequest;
+                    }
+                  } else {
+                    // No body
+                    final plainRequest = http.Request(method, uri);
+                    plainRequest.headers.addAll(headers);
+                    request = plainRequest;
+                  }
+
+                  // ── 缓存检查（仅 GET 非流式）─────────────────────────
+                  if (method == 'GET' && !wantsStream && request is http.Request && request.bodyBytes.isEmpty) {
+                    final cached = _requestCache.get(url);
+                    if (cached != null) {
+                      debugPrint('[RainCurtain Fetch] 💾 Cache hit: $url');
+                      return {
+                        'ok': true,
+                        'status': cached.statusCode,
+                        'statusText': cached.reasonPhrase ?? '',
+                        'headers': cached.headers,
+                        'bodyText': utf8.decode(cached.bodyBytes, allowMalformed: true),
+                        'bodyBase64': base64Encode(cached.bodyBytes),
+                        'streaming': false,
+                      };
+                    }
+                  }
+
+                  // ── 发送请求 ──────────────────────────────────────────
+                  final client = http.Client();
+                  if (requestId != null) {
+                    _activeRequests[requestId] = client;
+                  }
+
+                  try {
+                    final streamedResponse = await client.send(request);
+
+                    if (wantsStream) {
+                      // ── 流式响应：立即返回元数据，后台推送数据块 ────
+                      final responseHeaders = streamedResponse.headers;
+                      metrics.complete(streamedResponse.statusCode, 0);
+                      metrics.log();
+
+                      // 在后台监听数据流并推送到 JS 侧
+                      if (requestId != null && webViewController != null) {
+                        final rcId = requestId; // capture
+                        final wvc = webViewController!;
+                        streamedResponse.stream.listen(
+                          (chunk) {
+                            final b64 = base64Encode(chunk);
+                            // Push chunk to JS via evaluateJavascript
+                            wvc.evaluateJavascript(
+                              source: 'if(window["__rc_stream_chunk_$rcId"])window["__rc_stream_chunk_$rcId"]("$b64");',
+                            );
+                          },
+                          onDone: () {
+                            wvc.evaluateJavascript(
+                              source: 'if(window["__rc_stream_done_$rcId"])window["__rc_stream_done_$rcId"]();',
+                            );
+                            _activeRequests.remove(rcId);
+                            _requestMetrics.remove(rcId);
+                            client.close();
+                          },
+                          onError: (e) {
+                            final msg = e.toString().replaceAll('"', '\\"');
+                            wvc.evaluateJavascript(
+                              source: 'if(window["__rc_stream_error_$rcId"])window["__rc_stream_error_$rcId"]("$msg");',
+                            );
+                            _activeRequests.remove(rcId);
+                            _requestMetrics.remove(rcId);
+                            client.close();
+                          },
+                          cancelOnError: true,
+                        );
+                      } else {
+                        // No requestId or controller — fall back to buffered
+                        final response = await http.Response.fromStream(streamedResponse);
+                        metrics.complete(response.statusCode, response.bodyBytes.length);
+                        client.close();
+                        return {
+                          'ok': true,
+                          'status': response.statusCode,
+                          'statusText': response.reasonPhrase ?? '',
+                          'headers': response.headers,
+                          'bodyText': utf8.decode(response.bodyBytes, allowMalformed: true),
+                          'bodyBase64': base64Encode(response.bodyBytes),
+                          'streaming': false,
+                        };
+                      }
+
+                      return {
+                        'ok': true,
+                        'status': streamedResponse.statusCode,
+                        'statusText': streamedResponse.reasonPhrase ?? '',
+                        'headers': responseHeaders,
+                        'streaming': true,
+                      };
+                    } else {
+                      // ── 缓冲响应（现有行为）──────────────────────────
+                      final response = await http.Response.fromStream(streamedResponse);
+                      
+                      // 记录性能指标
+                      metrics.complete(response.statusCode, response.bodyBytes.length);
+                      metrics.log();
+
+                      // 写入缓存（仅 GET）
+                      if (method == 'GET') {
+                        final entry = _CachedResponse.fromResponse(response);
+                        if (entry != null) {
+                          _requestCache.put(url, entry);
+                        }
+                      }
+                      
+                      return {
+                        'ok': true,
+                        'status': response.statusCode,
+                        'statusText': response.reasonPhrase ?? '',
+                        'headers': response.headers,
+                        'bodyText': utf8.decode(response.bodyBytes, allowMalformed: true),
+                        'bodyBase64': base64Encode(response.bodyBytes),
+                        'streaming': false,
+                      };
+                    }
+                  } finally {
+                    if (!wantsStream) {
+                      // For streaming, cleanup is done in stream callbacks
+                      client.close();
+                      if (requestId != null) {
+                        _activeRequests.remove(requestId);
+                        _requestMetrics.remove(requestId);
+                      }
+                    }
+                  }
+                } catch (e) {
+                  metrics.fail(e.toString());
+                  metrics.log();
+                  return {
+                    'ok': false,
+                    'error': e.toString(),
+                  };
+                } finally {
+                  if (requestId != null) {
+                    _requestMetrics.remove(requestId);
+                  }
+                }
+              },
+            );
+
+            // 注册 JS Handler：取消进行中的网络请求
+            controller.addJavaScriptHandler(
+              handlerName: 'raincurtain_abort',
+              callback: (args) async {
+                if (args.isEmpty) return null;
+                
+                try {
+                  final data = args[0] as Map<dynamic, dynamic>;
+                  final requestId = data['requestId'] as String?;
+                  
+                  if (requestId != null) {
+                    final client = _activeRequests.remove(requestId);
+                    if (client != null) {
+                      client.close();
+                      debugPrint('[RainCurtain Fetch] ⚠️ Request aborted: $requestId');
+                    }
+                    _requestMetrics.remove(requestId);
+                  }
+                } catch (e) {
+                  debugPrint('Abort handler error: $e');
                 }
                 
                 return null;

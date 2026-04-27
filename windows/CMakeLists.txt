@@ -29,6 +29,10 @@ set(CMAKE_SHARED_LINKER_FLAGS_PROFILE "${CMAKE_SHARED_LINKER_FLAGS_RELEASE}")
 set(CMAKE_C_FLAGS_PROFILE "${CMAKE_C_FLAGS_RELEASE}")
 set(CMAKE_CXX_FLAGS_PROFILE "${CMAKE_CXX_FLAGS_RELEASE}")
 
+# 静态链接 VC++ 运行时库 (备选方案)
+# 如果不想依赖外部 VC++ Redistributable,可以取消下面的注释
+# set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
 # Use Unicode for all projects.
 add_definitions(-DUNICODE -D_UNICODE)
 

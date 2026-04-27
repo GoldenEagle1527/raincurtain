@@ -6,6 +6,7 @@ import 'theme/theme_provider.dart';
 import 'models/plugin_manager.dart';
 import 'models/plugin_data_manager.dart';
 import 'models/tab_manager.dart';
+import 'models/window_config_manager.dart';
 import 'screens/home_page.dart';
 import 'widgets/rain_background.dart';
 
@@ -34,6 +35,7 @@ void main() async {
         ChangeNotifierProvider(create: (_) => PluginManager()),
         ChangeNotifierProvider(create: (_) => PluginDataManager()),
         ChangeNotifierProvider(create: (_) => TabManager()),
+        ChangeNotifierProvider(create: (_) => WindowConfigManager()),
       ],
       child: const RainCurtainApp(),
     ),
@@ -54,6 +56,10 @@ class _RainCurtainAppState extends State<RainCurtainApp> {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      // 初始化窗口配置管理器
+      final windowConfig = Provider.of<WindowConfigManager>(context, listen: false);
+      windowConfig.init();
+
       final pm = Provider.of<PluginManager>(context, listen: false);
       
       void checkAndStartServer() async {

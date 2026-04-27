@@ -6,6 +6,7 @@ import '../models/tab_manager.dart';
 import '../utils/responsive_helper.dart';
 import '../widgets/theme_toggle_button.dart';
 import '../widgets/closeable_tab.dart';
+import '../widgets/plugin_overwrite_dialog.dart';
 import 'market_view.dart';
 import 'plugin_webview.dart';
 import 'settings_page.dart';
@@ -258,7 +259,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     
     return Scaffold(
       appBar: AppBar(
-        title: const Text('RainCurtain Plugin OS'),
+        title: const Text('雨幕'),
         actions: [
           if (isPlugin)
             IconButton(
@@ -456,7 +457,31 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     return FloatingActionButton(
       onPressed: () async {
         try {
-          await pluginManager.installPlugin();
+          await pluginManager.installPlugin(
+            onConflict: (existingPlugin, newManifest) async {
+              if (!context.mounted) return false;
+              
+              // 显示覆盖确认对话框
+              final confirmed = await showDialog<bool>(
+                context: context,
+                builder: (context) => PluginOverwriteDialog(
+                  existingPlugin: existingPlugin,
+                  newManifest: newManifest,
+                ),
+              );
+              
+              return confirmed ?? false;
+            },
+          );
+          
+          if (!context.mounted) return;
+          final colorScheme = Theme.of(context).colorScheme;
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: const Text('插件安装成功'),
+              backgroundColor: colorScheme.primary,
+            ),
+          );
         } catch (e) {
           if (!context.mounted) return;
           final colorScheme = Theme.of(context).colorScheme;

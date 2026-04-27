@@ -7,6 +7,9 @@
 #include <memory>
 #include <string>
 
+class TrayManager;
+class HotkeyManager;
+
 // A class abstraction for a high DPI-aware Win32 Window. Intended to be
 // inherited from by classes that wish to specialize with custom
 // rendering and input handling
@@ -55,6 +58,30 @@ class Win32Window {
   // Return a RECT representing the bounds of the current client area.
   RECT GetClientArea();
 
+  // Show and activate the window
+  void ShowAndActivate();
+
+  // Hide the window
+  void Hide();
+
+  // Toggle window visibility
+  void ToggleVisibility();
+
+  // Check if window is visible
+  bool IsVisible() const;
+
+  // Set tray manager
+  void SetTrayManager(std::unique_ptr<TrayManager> trayManager);
+
+  // Set hotkey manager
+  void SetHotkeyManager(std::unique_ptr<HotkeyManager> hotkeyManager);
+
+  // Get tray manager
+  TrayManager* GetTrayManager() { return tray_manager_.get(); }
+
+  // Get hotkey manager
+  HotkeyManager* GetHotkeyManager() { return hotkey_manager_.get(); }
+
  protected:
   // Processes and route salient window messages for mouse handling,
   // size change and DPI. Delegates handling of these to member overloads that
@@ -97,6 +124,12 @@ class Win32Window {
 
   // window handle for hosted content.
   HWND child_content_ = nullptr;
+
+  // Tray manager
+  std::unique_ptr<TrayManager> tray_manager_;
+
+  // Hotkey manager
+  std::unique_ptr<HotkeyManager> hotkey_manager_;
 };
 
 #endif  // RUNNER_WIN32_WINDOW_H_

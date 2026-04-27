@@ -5,7 +5,6 @@ import '../models/plugin_manager.dart';
 import '../models/tab_manager.dart';
 import '../utils/responsive_helper.dart';
 import '../widgets/plugin_icon_widget.dart';
-import '../widgets/plugin_upgrade_dialog.dart';
 
 /// 插件市场视图
 /// 使用 MD3 组件和主题色系统
@@ -152,81 +151,17 @@ class MarketView extends StatelessWidget {
           ),
         ),
         isThreeLine: true,
-        trailing: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            IconButton(
-              icon: const Icon(Icons.upgrade_outlined),
-              color: colorScheme.primary,
-              onPressed: () => _handleUpgrade(context, plugin, pluginManager),
-              tooltip: '升级',
-            ),
-            IconButton(
-              icon: const Icon(Icons.delete_outline),
-              color: colorScheme.error,
-              onPressed: () => _showUninstallDialog(context, plugin, pluginManager),
-              tooltip: '卸载',
-            ),
-          ],
+        trailing: IconButton(
+          icon: const Icon(Icons.delete_outline),
+          color: colorScheme.error,
+          onPressed: () => _showUninstallDialog(context, plugin, pluginManager),
+          tooltip: '卸载',
         ),
         onTap: () {
           Provider.of<TabManager>(context, listen: false).openOrSwitchTab(plugin);
         },
       ),
     );
-  }
-  
-  /// 处理插件升级
-  Future<void> _handleUpgrade(
-    BuildContext context,
-    LocalPlugin plugin,
-    PluginManager pluginManager,
-  ) async {
-    final colorScheme = Theme.of(context).colorScheme;
-    
-    try {
-      final upgradeInfo = await pluginManager.prepareUpgrade(plugin.id);
-      
-      if (upgradeInfo == null) {
-        return; // 用户取消了选择
-      }
-      
-      if (!context.mounted) return;
-      
-      // 显示升级确认对话框
-      final confirmed = await showDialog<bool>(
-        context: context,
-        builder: (context) => PluginUpgradeDialog(upgradeInfo: upgradeInfo),
-      );
-      
-      if (confirmed != true) {
-        return;
-      }
-      
-      if (!context.mounted) return;
-      
-      // 执行升级
-      await pluginManager.upgradePlugin(plugin.id, upgradeInfo.zipFile);
-      
-      if (!context.mounted) return;
-      
-      // 显示成功提示
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('${plugin.name} 已升级到 v${upgradeInfo.newManifest.version}'),
-          backgroundColor: colorScheme.primary,
-        ),
-      );
-    } catch (e) {
-      if (!context.mounted) return;
-      
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('升级失败: $e'),
-          backgroundColor: colorScheme.error,
-        ),
-      );
-    }
   }
   
   /// 显示卸载确认对话框

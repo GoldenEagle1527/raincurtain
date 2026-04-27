@@ -8,6 +8,7 @@ enum VersionComparisonResult {
 
 class PluginManifest {
   PluginManifest({
+    required this.id,
     required this.name,
     required this.description,
     required this.version,
@@ -15,6 +16,7 @@ class PluginManifest {
     this.icon = const DefaultIcon(),
   });
 
+  final String id;
   final String name;
   final String description;
   final String version;
@@ -22,10 +24,17 @@ class PluginManifest {
   final PluginIcon icon;
 
   static final RegExp _semverRegex = RegExp(r'^\d+\.\d+\.\d+$');
+  static final RegExp _uuidV7Regex = RegExp(
+    r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$',
+  );
 
   static bool isValidVersion(String value) => _semverRegex.hasMatch(value.trim());
+  static bool isValidId(String value) => _uuidV7Regex.hasMatch(value.trim());
 
   void validate() {
+    if (!isValidId(id)) {
+      throw const FormatException('manifest.yml 中的 id 必须为 UUID v7');
+    }
     if (name.trim().isEmpty) {
       throw const FormatException('manifest.yml 缺少有效的 name');
     }
@@ -41,6 +50,7 @@ class PluginManifest {
   }
 
   Map<String, dynamic> toJson() => {
+    'id': id,
     'name': name,
     'description': description,
     'version': version,
@@ -50,6 +60,7 @@ class PluginManifest {
 
   factory PluginManifest.fromJson(Map<String, dynamic> json) {
     final manifest = PluginManifest(
+      id: (json['id'] ?? '').toString(),
       name: (json['name'] ?? '').toString(),
       description: (json['description'] ?? '').toString(),
       version: (json['version'] ?? '').toString(),
@@ -62,6 +73,7 @@ class PluginManifest {
 
   factory PluginManifest.fromYamlMap(Map<dynamic, dynamic> yaml) {
     final manifest = PluginManifest(
+      id: (yaml['id'] ?? '').toString(),
       name: (yaml['name'] ?? '').toString(),
       description: (yaml['description'] ?? '').toString(),
       version: (yaml['version'] ?? '').toString(),

@@ -18,9 +18,67 @@ Compression=lzma2/ultra64
 SolidCompression=yes
 MinVersion=10.0
 ArchitecturesAllowed=x64compatible
-PrivilegesRequired=lowest
+; 修改为 admin 权限以支持 VC++ 运行时安装
+; 如果用户拒绝提权,安装器会提示手动安装运行时
+PrivilegesRequired=admin
+PrivilegesRequiredOverridesAllowed=dialog
 ; 根据要求：不要单例检测
 ; AppMutex=
+
+; VC++ 运行时依赖检测与安装
+[Code]
+var
+  VCRedistInstallFailed: Boolean;
+
+function VCRedistNeedsInstall: Boolean;
+var
+  Version: String;
+begin
+  // 检查 VC++ 2015-2022 Redistributable (x64) 是否已安装
+  // 注册表键值对应 14.30+ 版本 (包含 MSVCP140.dll)
+  if RegQueryStringValue(HKLM64, 'SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64', 'Version', Version) then
+  begin
+    Result := False; // 已安装
+  end
+  else
+  begin
+    Result := True; // 需要安装
+  end;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  ResultCode: Integer;
+begin
+  if CurStep = ssPostInstall then
+  begin
+    if VCRedistNeedsInstall then
+    begin
+      // 尝试静默安装 VC++ 运行时
+      if not Exec(ExpandConstant('{tmp}\vc_redist.x64.exe'), '/install /quiet /norestart', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then
+      begin
+        VCRedistInstallFailed := True;
+      end;
+    end;
+  end;
+end;
+
+procedure DeinitializeSetup();
+var
+  ErrorMsg: String;
+begin
+  if VCRedistInstallFailed then
+  begin
+    ErrorMsg := '警告：Visual C++ 运行库安装失败！' + #13#10 + #13#10 +
+                '应用程序需要此运行库才能正常运行。' + #13#10 +
+                '请手动安装 VC++ Redistributable:' + #13#10 + #13#10 +
+                '1. 打开安装目录: ' + ExpandConstant('{app}') + #13#10 +
+                '2. 运行 vc_redist.x64.exe' + #13#10 + #13#10 +
+                '或从微软官网下载:' + #13#10 +
+                'https://aka.ms/vs/17/release/vc_redist.x64.exe';
+    MsgBox(ErrorMsg, mbError, MB_OK);
+  end;
+end;
 
 [Languages]
 Name: "chinesesimp"; MessagesFile: "compiler:Default.isl"
@@ -36,10 +94,19 @@ Source: "{#MyAppSourceDir}\flutter_windows.dll"; DestDir: "{app}"; Flags: ignore
 Source: "{#MyAppSourceDir}\data\*"; DestDir: "{app}\data"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#MyAppSourceDir}\*.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 
+; 嵌入 VC++ Redistributable 安装包 (需要手动下载放置到 redist 目录)
+; 下载地址: https://aka.ms/vs/17/release/vc_redist.x64.exe
+; 同时复制到安装目录供用户手动安装
+Source: "redist\vc_redist.x64.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall; Check: VCRedistNeedsInstall
+Source: "redist\vc_redist.x64.exe"; DestDir: "{app}"; Flags: ignoreversion; Check: VCRedistNeedsInstall
+
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
+; 注意：VC++ 运行时安装已移至 CurStepChanged 中处理
+; 这样可以更好地捕获错误并提示用户
+
 ; 根据要求：安装后不显示打开程序选项
 ; 这里不添加 postinstall 标志的 Run 条目

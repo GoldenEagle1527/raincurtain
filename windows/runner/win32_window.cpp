@@ -4,6 +4,8 @@
 #include <flutter_windows.h>
 
 #include "resource.h"
+#include "tray_manager.h"
+#include "hotkey_manager.h"
 
 namespace {
 
@@ -179,6 +181,10 @@ Win32Window::MessageHandler(HWND hwnd,
                             WPARAM const wparam,
                             LPARAM const lparam) noexcept {
   switch (message) {
+    case WM_CLOSE:
+      Hide();
+      return 0;
+
     case WM_DESTROY:
       window_handle_ = nullptr;
       Destroy();
@@ -186,6 +192,13 @@ Win32Window::MessageHandler(HWND hwnd,
         PostQuitMessage(0);
       }
       return 0;
+
+    case WM_SYSCOMMAND:
+      if (wparam == SC_MINIMIZE) {
+        Hide();
+        return 0;
+      }
+      break;
 
     case WM_DPICHANGED: {
       auto newRectSize = reinterpret_cast<RECT*>(lparam);
@@ -216,6 +229,19 @@ Win32Window::MessageHandler(HWND hwnd,
     case WM_DWMCOLORIZATIONCOLORCHANGED:
       UpdateTheme(hwnd);
       return 0;
+
+    case WM_HOTKEY:
+      if (hotkey_manager_) {
+        hotkey_manager_->HandleHotkeyMessage();
+      }
+      return 0;
+
+    default:
+      if (message == TrayManager::WM_TRAYICON && tray_manager_) {
+        tray_manager_->HandleTrayMessage(wparam, lparam);
+        return 0;
+      }
+      break;
   }
 
   return DefWindowProc(window_handle_, message, wparam, lparam);
@@ -285,4 +311,35 @@ void Win32Window::UpdateTheme(HWND const window) {
     DwmSetWindowAttribute(window, DWMWA_USE_IMMERSIVE_DARK_MODE,
                           &enable_dark_mode, sizeof(enable_dark_mode));
   }
+}
+
+void Win32Window::ShowAndActivate() {
+  ShowWindow(window_handle_, SW_SHOW);
+  SetForegroundWindow(window_handle_);
+  BringWindowToTop(window_handle_);
+  SetFocus(window_handle_);
+}
+
+void Win32Window::Hide() {
+  ShowWindow(window_handle_, SW_HIDE);
+}
+
+void Win32Window::ToggleVisibility() {
+  if (IsVisible()) {
+    Hide();
+  } else {
+    ShowAndActivate();
+  }
+}
+
+bool Win32Window::IsVisible() const {
+  return window_handle_ && IsWindowVisible(window_handle_);
+}
+
+void Win32Window::SetTrayManager(std::unique_ptr<TrayManager> trayManager) {
+  tray_manager_ = std::move(trayManager);
+}
+
+void Win32Window::SetHotkeyManager(std::unique_ptr<HotkeyManager> hotkeyManager) {
+  hotkey_manager_ = std::move(hotkeyManager);
 }
