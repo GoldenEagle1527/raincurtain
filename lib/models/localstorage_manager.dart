@@ -144,6 +144,36 @@ class LocalStorageManager {
     }
   }
 
+  /// 获取所有键
+  Future<List<String>> getKeys(String pluginId) async {
+    try {
+      final currentData = await loadLocalStorage(pluginId);
+      return currentData.keys.toList();
+    } catch (e) {
+      debugPrint('Failed to get keys for $pluginId: $e');
+      return [];
+    }
+  }
+
+  /// 获取单个项
+  Future<dynamic> getItem(String pluginId, String key) async {
+    try {
+      final currentData = await loadLocalStorage(pluginId);
+      final value = currentData[key];
+      if (value is String) {
+        try {
+          return jsonDecode(value);
+        } catch (_) {
+          return value;
+        }
+      }
+      return value;
+    } catch (e) {
+      debugPrint('Failed to get item for $pluginId: $e');
+      return null;
+    }
+  }
+
   /// 获取所有插件的 LocalStorage 文件列表
   Future<List<String>> getAllPluginIds() async {
     try {

@@ -96,10 +96,33 @@ class PluginManager extends ChangeNotifier {
   Future<void> _loadPlugins() async {
     final prefs = await SharedPreferences.getInstance();
     final pluginsJson = prefs.getString('saved_plugins');
-    if (pluginsJson != null) {
-      final List<dynamic> decoded = jsonDecode(pluginsJson);
-      _plugins = decoded.map((e) => LocalPlugin.fromJson(e)).toList();
+    if (pluginsJson == null) return;
+
+    final List<dynamic> decoded = jsonDecode(pluginsJson);
+    final List<LocalPlugin> loaded = [];
+
+    for (final e in decoded) {
+      final entryPath = (e['entryPath'] ?? '').toString();
+      if (entryPath.isEmpty) continue;
+
+      try {
+        // manifest.yml 与 index.html 在同一目录
+        final entryFile = File(p.join(sandboxDir.path, entryPath));
+        final manifestFile = File(p.join(entryFile.parent.path, 'manifest.yml'));
+
+        if (!await manifestFile.exists()) {
+          debugPrint('manifest.yml not found for entryPath: $entryPath');
+          continue;
+        }
+
+        final manifest = await _readManifest(manifestFile);
+        loaded.add(LocalPlugin(entryPath: entryPath, manifest: manifest));
+      } catch (err) {
+        debugPrint('Failed to load plugin ($entryPath): $err');
+      }
     }
+
+    _plugins = loaded;
   }
 
   Future<void> _savePlugins() async {

@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../models/plugin_manager.dart';
 import '../models/tab_manager.dart';
+import '../models/app_mode_manager.dart';
+import '../models/pool_manager.dart';
 import '../utils/responsive_helper.dart';
 import '../widgets/theme_toggle_button.dart';
 import '../widgets/closeable_tab.dart';
@@ -10,6 +12,7 @@ import '../widgets/plugin_overwrite_dialog.dart';
 import 'market_view.dart';
 import 'plugin_webview.dart';
 import 'settings_page.dart';
+import 'stream_view.dart';
 
 /// 主页面
 /// 根据屏幕尺寸自动切换布局模式:
@@ -146,13 +149,31 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   Widget _buildCompactLayout(BuildContext context, TabManager tabManager) {
     final currentTab = tabManager.currentTab;
     final pluginManager = context.read<PluginManager>();
+    final appModeManager = context.watch<AppModeManager>();
     final isPlugin = currentTab.plugin != null;
+    final isStreamMode = appModeManager.isStreamMode;
     
     return Scaffold(
       appBar: AppBar(
-        title: Text(currentTab.title),
+        title: GestureDetector(
+          onTap: () => appModeManager.switchMode(),
+          child: Tooltip(
+            message: isStreamMode ? '点击切换到雨幕模式' : '点击切换到溯流模式',
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(isStreamMode ? '溯流' : '雨幕'),
+                const SizedBox(width: 4),
+                Icon(
+                  isStreamMode ? Icons.water_outlined : Icons.cloudy_snowing,
+                  size: 18,
+                ),
+              ],
+            ),
+          ),
+        ),
         actions: [
-          if (isPlugin)
+          if (!isStreamMode && isPlugin)
             IconButton(
               icon: const Icon(Icons.bug_report_outlined),
               tooltip: '打开开发者控制台',
@@ -172,9 +193,15 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
           ),
         ],
       ),
-      drawer: _buildDrawer(context, tabManager),
+      drawer: isStreamMode ? null : _buildDrawer(context, tabManager),
       body: _buildBodyContent(context, tabManager),
-      floatingActionButton: _buildInstallFAB(context, pluginManager),
+      floatingActionButton: isStreamMode
+          ? FloatingActionButton(
+              onPressed: () => _showCreatePoolDialog(context),
+              tooltip: '新建池',
+              child: const Icon(Icons.add),
+            )
+          : _buildInstallFAB(context, pluginManager),
     );
   }
   
@@ -184,13 +211,31 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     final colorScheme = Theme.of(context).colorScheme;
     final currentTab = tabManager.currentTab;
     final pluginManager = context.read<PluginManager>();
+    final appModeManager = context.watch<AppModeManager>();
     final isPlugin = currentTab.plugin != null;
+    final isStreamMode = appModeManager.isStreamMode;
     
     return Scaffold(
       appBar: AppBar(
-        title: Text(currentTab.title),
+        title: GestureDetector(
+          onTap: () => appModeManager.switchMode(),
+          child: Tooltip(
+            message: isStreamMode ? '点击切换到雨幕模式' : '点击切换到溯流模式',
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(isStreamMode ? '溯流' : '雨幕'),
+                const SizedBox(width: 4),
+                Icon(
+                  isStreamMode ? Icons.water_outlined : Icons.cloudy_snowing,
+                  size: 18,
+                ),
+              ],
+            ),
+          ),
+        ),
         actions: [
-          if (isPlugin)
+          if (!isStreamMode && isPlugin)
             IconButton(
               icon: const Icon(Icons.bug_report_outlined),
               tooltip: '打开开发者控制台',
@@ -210,43 +255,54 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
           ),
         ],
       ),
-      body: Row(
-        children: [
-          // NavigationRail 侧边导航
-          NavigationRail(
-            selectedIndex: tabManager.currentIndex,
-            onDestinationSelected: tabManager.switchToTab,
-            labelType: NavigationRailLabelType.all,
-            trailing: Expanded(
-              child: Align(
-                alignment: Alignment.bottomCenter,
-                child: Padding(
-                  padding: const EdgeInsets.only(bottom: 8),
-                  child: ThemeToggleIconButton(),
+      body: isStreamMode
+          ? _buildBodyContent(context, tabManager)
+          : Row(
+              children: [
+                // NavigationRail 侧边导航
+                NavigationRail(
+                  selectedIndex: tabManager.currentIndex,
+                  onDestinationSelected: tabManager.switchToTab,
+                  labelType: NavigationRailLabelType.all,
+                  trailing: Expanded(
+                    child: Align(
+                      alignment: Alignment.bottomCenter,
+                      child: Padding(
+                        padding: const EdgeInsets.only(bottom: 8),
+                        child: ThemeToggleIconButton(),
+                      ),
+                    ),
+                  ),
+                  destinations: tabManager.tabs.map((tab) {
+                    return NavigationRailDestination(
+                      icon: Icon(tab.plugin == null
+                          ? Icons.store_outlined
+                          : Icons.extension_outlined),
+                      selectedIcon: Icon(
+                          tab.plugin == null ? Icons.store : Icons.extension),
+                      label: Text(_truncateTitle(tab.title, 10)),
+                    );
+                  }).toList(),
                 ),
-              ),
+                // 垂直分割线
+                VerticalDivider(
+                  thickness: 1,
+                  width: 1,
+                  color: colorScheme.outlineVariant,
+                ),
+                // 主内容区域
+                Expanded(
+                  child: _buildBodyContent(context, tabManager),
+                ),
+              ],
             ),
-            destinations: tabManager.tabs.map((tab) {
-              return NavigationRailDestination(
-                icon: Icon(tab.plugin == null ? Icons.store_outlined : Icons.extension_outlined),
-                selectedIcon: Icon(tab.plugin == null ? Icons.store : Icons.extension),
-                label: Text(_truncateTitle(tab.title, 10)),
-              );
-            }).toList(),
-          ),
-          // 垂直分割线
-          VerticalDivider(
-            thickness: 1,
-            width: 1,
-            color: colorScheme.outlineVariant,
-          ),
-          // 主内容区域
-          Expanded(
-            child: _buildBodyContent(context, tabManager),
-          ),
-        ],
-      ),
-      floatingActionButton: _buildInstallFAB(context, pluginManager),
+      floatingActionButton: isStreamMode
+          ? FloatingActionButton(
+              onPressed: () => _showCreatePoolDialog(context),
+              tooltip: '新建池',
+              child: const Icon(Icons.add),
+            )
+          : _buildInstallFAB(context, pluginManager),
     );
   }
   
@@ -254,18 +310,42 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   /// 使用 MD3 风格的顶部标签栏
   Widget _buildLargeLayout(BuildContext context, TabManager tabManager) {
     final pluginManager = context.read<PluginManager>();
+    final appModeManager = context.watch<AppModeManager>();
     final tabController = _getTabController(tabManager);
     final isPlugin = tabManager.currentTab.plugin != null;
+    final isStreamMode = appModeManager.isStreamMode;
     
     return Scaffold(
       appBar: AppBar(
-        title: const Text('雨幕'),
+        title: GestureDetector(
+          onTap: () => appModeManager.switchMode(),
+          child: Tooltip(
+            message: isStreamMode ? '点击切换到雨幕模式' : '点击切换到溯流模式',
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(isStreamMode ? '溯流' : '雨幕'),
+                const SizedBox(width: 4),
+                Icon(
+                  isStreamMode ? Icons.water_outlined : Icons.cloudy_snowing,
+                  size: 18,
+                ),
+              ],
+            ),
+          ),
+        ),
         actions: [
-          if (isPlugin)
+          if (!isStreamMode && isPlugin)
             IconButton(
               icon: const Icon(Icons.bug_report_outlined),
               tooltip: '打开开发者控制台',
               onPressed: _openCurrentDevTools,
+            ),
+          if (isStreamMode)
+            IconButton(
+              icon: const Icon(Icons.add),
+              tooltip: '新建池',
+              onPressed: () => _showCreatePoolDialog(context),
             ),
           IconButton(
             icon: const Icon(Icons.settings),
@@ -280,81 +360,51 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
             },
           ),
         ],
-        bottom: PreferredSize(
-          preferredSize: const Size.fromHeight(36),
-          child: Align(
-            alignment: Alignment.centerLeft,
-            child: TabBar(
-              controller: tabController,
-              isScrollable: true,
-              tabAlignment: TabAlignment.start,
-              tabs: List.generate(tabManager.tabs.length, (index) {
-                final tab = tabManager.tabs[index];
-                return Tab(
-                  height: 36,
-                  child: CloseableTab(
-                    icon: tab.plugin == null ? Icons.store : Icons.extension,
-                    text: tab.title,
-                    showCloseButton: tab.plugin != null,
-                    onClose: tab.plugin != null
-                        ? () => tabManager.closeTab(index)
-                        : null,
-                    maxTextLength: 15,
+        bottom: isStreamMode
+            ? null
+            : PreferredSize(
+                preferredSize: const Size.fromHeight(36),
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: TabBar(
+                    controller: tabController,
+                    isScrollable: true,
+                    tabAlignment: TabAlignment.start,
+                    tabs: List.generate(tabManager.tabs.length, (index) {
+                      final tab = tabManager.tabs[index];
+                      return Tab(
+                        height: 36,
+                        child: CloseableTab(
+                          icon: tab.plugin == null
+                              ? Icons.store
+                              : Icons.extension,
+                          text: tab.title,
+                          showCloseButton: tab.plugin != null,
+                          onClose: tab.plugin != null
+                              ? () => tabManager.closeTab(index)
+                              : null,
+                          maxTextLength: 15,
+                        ),
+                      );
+                    }),
                   ),
-                );
-              }),
-            ),
-          ),
-        ),
+                ),
+              ),
       ),
       body: _buildBodyContent(context, tabManager),
-      floatingActionButton: _buildInstallFAB(context, pluginManager),
+      floatingActionButton: isStreamMode
+          ? null
+          : _buildInstallFAB(context, pluginManager),
     );
   }
   
   /// 构建抽屉菜单 (紧凑布局)
   Widget _buildDrawer(BuildContext context, TabManager tabManager) {
-    final colorScheme = Theme.of(context).colorScheme;
-    
     return Drawer(
       child: Column(
         children: [
-          // 抽屉头部
-          SizedBox(
-            width: double.infinity,
-            child: DrawerHeader(
-              margin: EdgeInsets.zero,
-              padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
-              decoration: BoxDecoration(
-                color: colorScheme.primaryContainer,
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Icon(
-                    Icons.extension,
-                    size: 48,
-                    color: colorScheme.onPrimaryContainer,
-                  ),
-                  const SizedBox(height: 16),
-                  Text(
-                    'RainCurtain',
-                    style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                      color: colorScheme.onPrimaryContainer,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    '已打开 ${tabManager.tabs.length} 个标签',
-                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                      color: colorScheme.onPrimaryContainer.withValues(alpha: 0.8),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
+          // 顶部安全区域间距
+          SizedBox(height: MediaQuery.of(context).padding.top + 8),
           // 标签列表
           Expanded(
             child: ListView.builder(
@@ -421,6 +471,12 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   
   /// 构建主内容区域
   Widget _buildBodyContent(BuildContext context, TabManager tabManager) {
+    // 溯流模式下显示溯流视图
+    final appModeManager = context.watch<AppModeManager>();
+    if (appModeManager.isStreamMode) {
+      return const StreamView();
+    }
+
     // 根据当前标签页列表构建 IndexedStack 的 children
     final children = <Widget>[];
     
@@ -502,5 +558,41 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   String _truncateTitle(String title, int maxLength) {
     if (title.length <= maxLength) return title;
     return '${title.substring(0, maxLength)}...';
+  }
+
+  /// 显示创建池对话框
+  void _showCreatePoolDialog(BuildContext context) {
+    final controller = TextEditingController();
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('新建池'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(
+            labelText: '池名称',
+            hintText: '请输入池的名称',
+            border: OutlineInputBorder(),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () {
+              final name = controller.text.trim();
+              if (name.isNotEmpty && ctx.mounted) {
+                ctx.read<PoolManager>().createPool(name);
+                Navigator.pop(ctx);
+              }
+            },
+            child: const Text('创建'),
+          ),
+        ],
+      ),
+    );
   }
 }

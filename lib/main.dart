@@ -7,6 +7,9 @@ import 'models/plugin_manager.dart';
 import 'models/plugin_data_manager.dart';
 import 'models/tab_manager.dart';
 import 'models/window_config_manager.dart';
+import 'models/app_mode_manager.dart';
+import 'models/pool_manager.dart';
+import 'models/variable_pool_manager.dart';
 import 'screens/home_page.dart';
 import 'widgets/rain_background.dart';
 
@@ -14,6 +17,9 @@ import 'sandbox_server.dart';
 
 // 用于承载插件沙盒文件的本地 HTTP 服务器静态实例
 SandboxServer? localhostServer;
+
+// 沙盒服务器实际监听端口（start() 成功后由系统自动分配）
+int sandboxServerPort = 0;
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -36,6 +42,9 @@ void main() async {
         ChangeNotifierProvider(create: (_) => PluginDataManager()),
         ChangeNotifierProvider(create: (_) => TabManager()),
         ChangeNotifierProvider(create: (_) => WindowConfigManager()),
+        ChangeNotifierProvider(create: (_) => AppModeManager()),
+        ChangeNotifierProvider(create: (_) => PoolManager()),
+        ChangeNotifierProvider(create: (_) => VariablePoolManager()),
       ],
       child: const RainCurtainApp(),
     ),
@@ -65,10 +74,10 @@ class _RainCurtainAppState extends State<RainCurtainApp> {
       void checkAndStartServer() async {
         if (pm.isInit && !_serverStarted) {
           localhostServer = SandboxServer(
-            port: 8080,
             documentRoot: pm.sandboxDir,
           );
           await localhostServer!.start();
+          sandboxServerPort = localhostServer!.actualPort;
           if (mounted) {
             setState(() {
               _serverStarted = true;

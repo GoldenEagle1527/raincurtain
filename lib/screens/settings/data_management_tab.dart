@@ -25,17 +25,16 @@ class _DataManagementTabState extends State<DataManagementTab> {
 
   Future<void> _loadDataStats() async {
     setState(() => _isLoading = true);
-    
+
     final dataManager = context.read<PluginDataManager>();
     if (!dataManager.isInit) {
-      // 等待初始化
       await Future.delayed(const Duration(milliseconds: 500));
       if (!dataManager.isInit) {
         setState(() => _isLoading = false);
         return;
       }
     }
-    
+
     final stats = await dataManager.getAllPluginsDataStats();
     if (mounted) {
       setState(() {
@@ -71,7 +70,7 @@ class _DataManagementTabState extends State<DataManagementTab> {
 
   Widget _buildStorageDirectoryCard(BuildContext context) {
     final dataManager = context.watch<PluginDataManager>();
-    
+
     if (!dataManager.isInit) {
       return const Card(
         child: ListTile(
@@ -81,7 +80,7 @@ class _DataManagementTabState extends State<DataManagementTab> {
         ),
       );
     }
-    
+
     final storagePath = dataManager.dataDir.path;
 
     return Card(
@@ -185,7 +184,7 @@ class _DataManagementTabState extends State<DataManagementTab> {
               ),
               const SizedBox(height: 8),
               Text(
-                '插件使用 Cookie 或 LocalStorage 后会在此显示',
+                '插件使用 LocalStorage 后会在此显示',
                 style: Theme.of(context).textTheme.bodySmall?.copyWith(
                       color: Theme.of(context).colorScheme.onSurfaceVariant,
                     ),
@@ -212,7 +211,9 @@ class _DataManagementTabState extends State<DataManagementTab> {
         ..._dataStats!.entries.map((entry) {
           final pluginId = entry.key;
           final stats = entry.value;
-          final plugin = pluginManager.plugins.cast<LocalPlugin?>().firstWhere(
+          final plugin = pluginManager.plugins
+              .cast<LocalPlugin?>()
+              .firstWhere(
                 (p) => p?.id == pluginId,
                 orElse: () => null,
               );
@@ -222,39 +223,9 @@ class _DataManagementTabState extends State<DataManagementTab> {
             child: ExpansionTile(
               leading: const Icon(Icons.extension),
               title: Text(plugin?.name ?? '未知插件'),
-              subtitle: Text('总计: ${PluginDataManager.formatBytes(stats.totalSize)}'),
+              subtitle: Text(
+                  '总计: ${PluginDataManager.formatBytes(stats.totalSize)}'),
               children: [
-                ListTile(
-                  leading: const Icon(Icons.cookie),
-                  title: const Text('Cookie'),
-                  trailing: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        crossAxisAlignment: CrossAxisAlignment.end,
-                        children: [
-                          Text('${stats.cookieCount} 项'),
-                          Text(
-                            PluginDataManager.formatBytes(stats.cookieSize),
-                            style: Theme.of(context).textTheme.bodySmall,
-                          ),
-                        ],
-                      ),
-                      const SizedBox(width: 8),
-                      IconButton(
-                        icon: const Icon(Icons.delete_outline),
-                        onPressed: () => _confirmClearSpecificData(
-                          context,
-                          pluginId,
-                          plugin?.name ?? '未知插件',
-                          'Cookie',
-                        ),
-                        tooltip: '清除 Cookie',
-                      ),
-                    ],
-                  ),
-                ),
                 ListTile(
                   leading: const Icon(Icons.storage),
                   title: const Text('LocalStorage'),
@@ -267,7 +238,8 @@ class _DataManagementTabState extends State<DataManagementTab> {
                         children: [
                           Text('${stats.localStorageItemCount} 项'),
                           Text(
-                            PluginDataManager.formatBytes(stats.localStorageSize),
+                            PluginDataManager.formatBytes(
+                                stats.localStorageSize),
                             style: Theme.of(context).textTheme.bodySmall,
                           ),
                         ],
@@ -287,7 +259,8 @@ class _DataManagementTabState extends State<DataManagementTab> {
                   ),
                 ),
                 Padding(
-                  padding: const EdgeInsets.only(left: 8, right: 8, bottom: 8),
+                  padding:
+                      const EdgeInsets.only(left: 8, right: 8, bottom: 8),
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.end,
                     children: [
@@ -305,7 +278,8 @@ class _DataManagementTabState extends State<DataManagementTab> {
                         icon: const Icon(Icons.delete_sweep),
                         label: const Text('清除全部'),
                         style: TextButton.styleFrom(
-                          foregroundColor: Theme.of(context).colorScheme.error,
+                          foregroundColor:
+                              Theme.of(context).colorScheme.error,
                         ),
                         onPressed: () => _confirmClearPluginData(
                           context,
@@ -357,7 +331,7 @@ class _DataManagementTabState extends State<DataManagementTab> {
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('确认清除全部数据'),
-        content: Text('确定要清除 "$pluginName" 的所有 Cookie 和 LocalStorage 数据吗？此操作不可撤销。'),
+        content: Text('确定要清除 "$pluginName" 的所有 LocalStorage 数据吗？此操作不可撤销。'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
@@ -418,11 +392,7 @@ class _DataManagementTabState extends State<DataManagementTab> {
 
     if (confirmed == true && context.mounted) {
       final dataManager = context.read<PluginDataManager>();
-      if (dataType == 'Cookie') {
-        await dataManager.clearCookieForPlugin(pluginId);
-      } else {
-        await dataManager.clearLocalStorageForPlugin(pluginId);
-      }
+      await dataManager.clearLocalStorageForPlugin(pluginId);
       await _loadDataStats();
 
       if (context.mounted) {

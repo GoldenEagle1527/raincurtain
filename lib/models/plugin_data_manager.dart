@@ -3,32 +3,26 @@ import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
-import 'cookie_storage_manager.dart';
 import 'localstorage_manager.dart';
 
 /// 插件数据统计信息
 class PluginDataStats {
-  final int cookieSize;
   final int localStorageSize;
-  final int cookieCount;
   final int localStorageItemCount;
 
   PluginDataStats({
-    required this.cookieSize,
     required this.localStorageSize,
-    required this.cookieCount,
     required this.localStorageItemCount,
   });
 
-  int get totalSize => cookieSize + localStorageSize;
-  int get totalItems => cookieCount + localStorageItemCount;
+  int get totalSize => localStorageSize;
+  int get totalItems => localStorageItemCount;
 }
 
 /// 插件数据管理器
-/// 统一管理 Cookie 和 LocalStorage 数据
+/// 管理 LocalStorage 数据（Cookie 存储已移除）
 class PluginDataManager extends ChangeNotifier {
   late Directory dataDir;
-  late CookieStorageManager cookieManager;
   late LocalStorageManager localStorageManager;
 
   bool _isInit = false;
@@ -43,18 +37,14 @@ class PluginDataManager extends ChangeNotifier {
       final supportDir = await getApplicationSupportDirectory();
       dataDir = Directory(p.join(supportDir.path, 'RainCurtainPluginsData'));
 
-      final cookieDir = Directory(p.join(dataDir.path, 'cookies'));
       final localStorageDir = Directory(p.join(dataDir.path, 'localstorage'));
-
-      await cookieDir.create(recursive: true);
       await localStorageDir.create(recursive: true);
 
-      cookieManager = CookieStorageManager(storageDir: cookieDir);
       localStorageManager = LocalStorageManager(storageDir: localStorageDir);
 
       _isInit = true;
       notifyListeners();
-      
+
       debugPrint('PluginDataManager initialized at: ${dataDir.path}');
     } catch (e, stackTrace) {
       debugPrint('PluginDataManager init failed: $e');
@@ -65,22 +55,18 @@ class PluginDataManager extends ChangeNotifier {
 
   /// 获取插件的总数据大小
   Future<int> getTotalSizeForPlugin(String pluginId) async {
-    final cookieSize = await cookieManager.getCookiesSizeForPlugin(pluginId);
-    final storageSize = await localStorageManager.getLocalStorageSize(pluginId);
-    return cookieSize + storageSize;
+    return localStorageManager.getLocalStorageSize(pluginId);
   }
 
   /// 获取插件的数据统计
   Future<PluginDataStats> getStatsForPlugin(String pluginId) async {
-    final cookieSize = await cookieManager.getCookiesSizeForPlugin(pluginId);
-    final localStorageSize = await localStorageManager.getLocalStorageSize(pluginId);
-    final cookieCount = await cookieManager.getCookieCountForPlugin(pluginId);
-    final localStorageItemCount = await localStorageManager.getLocalStorageItemCount(pluginId);
+    final localStorageSize =
+        await localStorageManager.getLocalStorageSize(pluginId);
+    final localStorageItemCount =
+        await localStorageManager.getLocalStorageItemCount(pluginId);
 
     return PluginDataStats(
-      cookieSize: cookieSize,
       localStorageSize: localStorageSize,
-      cookieCount: cookieCount,
       localStorageItemCount: localStorageItemCount,
     );
   }
@@ -88,17 +74,9 @@ class PluginDataManager extends ChangeNotifier {
   /// 获取所有插件的数据统计
   Future<Map<String, PluginDataStats>> getAllPluginsDataStats() async {
     final stats = <String, PluginDataStats>{};
-
-    // 获取所有有 Cookie 数据的插件
-    final cookiePluginIds = await cookieManager.getAllPluginIds();
-    
-    // 获取所有有 LocalStorage 数据的插件
     final storagePluginIds = await localStorageManager.getAllPluginIds();
 
-    // 合并插件 ID 列表
-    final allPluginIds = <String>{...cookiePluginIds, ...storagePluginIds};
-
-    for (final pluginId in allPluginIds) {
+    for (final pluginId in storagePluginIds) {
       stats[pluginId] = await getStatsForPlugin(pluginId);
     }
 
@@ -107,15 +85,7 @@ class PluginDataManager extends ChangeNotifier {
 
   /// 清除插件的所有数据
   Future<void> clearAllDataForPlugin(String pluginId) async {
-    await clearCookieForPlugin(pluginId);
     await clearLocalStorageForPlugin(pluginId);
-  }
-
-  /// 清除插件的 Cookie 数据
-  Future<void> clearCookieForPlugin(String pluginId) async {
-    await cookieManager.clearCookiesForPlugin(pluginId);
-    notifyListeners();
-    debugPrint('Cookies cleared for plugin: $pluginId');
   }
 
   /// 清除插件的 LocalStorage 数据
@@ -137,20 +107,19 @@ class PluginDataManager extends ChangeNotifier {
 
   /// 获取所有插件 ID
   Future<Set<String>> getAllPluginIds() async {
-    final cookiePluginIds = await cookieManager.getAllPluginIds();
     final storagePluginIds = await localStorageManager.getAllPluginIds();
-    return {...cookiePluginIds, ...storagePluginIds};
+    return {...storagePluginIds};
   }
 
   /// 获取总数据大小
   Future<int> getTotalDataSize() async {
     int totalSize = 0;
     final allPluginIds = await getAllPluginIds();
-    
+
     for (final pluginId in allPluginIds) {
       totalSize += await getTotalSizeForPlugin(pluginId);
     }
-    
+
     return totalSize;
   }
 
