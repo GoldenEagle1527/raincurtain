@@ -777,6 +777,27 @@ class PluginWebViewState extends State<PluginWebView>
   async function normalizeBody(body) {
     if (body == null) return null;
     if (typeof body === 'string') {
+      // 大字符串或含 data: URI 的字符串以 base64 传输，
+      // 避免 callHandler 序列化时触发 WebView bridge 限制
+      if (body.length > 32768 || body.indexOf('data:') >= 0) {
+        try {
+          var encoded = btoa(unescape(encodeURIComponent(body)));
+          return { kind: 'base64-text', data: encoded };
+        } catch (_) {
+          // btoa 失败时回退为 TextEncoder + 手动 base64
+          try {
+            var bytes = new TextEncoder().encode(body);
+            var binary = '';
+            var chunkSize = 0x8000;
+            for (var offset = 0; offset < bytes.length; offset += chunkSize) {
+              binary += String.fromCharCode.apply(null, bytes.subarray(offset, offset + chunkSize));
+            }
+            return { kind: 'base64-text', data: btoa(binary) };
+          } catch (_2) {
+            return { kind: 'text', data: body };
+          }
+        }
+      }
       return { kind: 'text', data: body };
     }
     if (typeof URLSearchParams !== 'undefined' && body instanceof URLSearchParams) {
@@ -940,17 +961,32 @@ class PluginWebViewState extends State<PluginWebView>
     var wantsStream = (headers['accept'] || headers['Accept'] || '').indexOf('text/event-stream') >= 0
       || headers['x-rc-stream'] === '1';
 
-    var result = await window.flutter_inappwebview.callHandler('raincurtain_fetch', {
-      requestId: requestId,
-      url: url,
-      method: method,
-      headers: headers,
-      body: body,
-      stream: wantsStream,
-    });
+    var result;
+    try {
+      result = await window.flutter_inappwebview.callHandler('raincurtain_fetch', {
+        requestId: requestId,
+        url: url,
+        method: method,
+        headers: headers,
+        body: body,
+        stream: wantsStream,
+      });
+    } catch (handlerErr) {
+      console.error('[interceptedFetch] callHandler threw:', handlerErr);
+      throw new TypeError('callHandler failed: ' + (handlerErr && handlerErr.message ? handlerErr.message : String(handlerErr)));
+    }
 
-    if (!result || result.ok !== true) {
-      throw new TypeError((result && result.error) || 'Network request failed');
+    if (!result) {
+      console.error('[interceptedFetch] Flutter returned null/undefined');
+      throw new TypeError('Network request failed: no response from host');
+    }
+    // success 字段表示网络层是否成功（有 HTTP 响应即为 true，包括 4xx/5xx）
+    // 仅当网络层失败（DNS/超时/连接拒绝等）时才抛 TypeError
+    // 兼容旧版：若没有 success 字段，回退到用 ok 判断
+    var netSuccess = (typeof result.success === 'boolean') ? result.success : (result.ok === true);
+    if (!netSuccess) {
+      console.error('[interceptedFetch] Network-level failure:', result);
+      throw new TypeError(result.error || 'Network request failed');
     }
 
     // 如果 Flutter 确认以流式方式响应
@@ -1125,7 +1161,9 @@ class PluginWebViewState extends State<PluginWebView>
           stream: false,
         });
 
-        if (!result || result.ok !== true) {
+        // success 表示网络层成功（有 HTTP 响应），HTTP 4xx/5xx 仍算成功
+        var netSuccess = result && ((typeof result.success === 'boolean') ? result.success : (result.ok === true));
+        if (!netSuccess) {
           throw new Error((result && result.error) || 'Network request failed');
         }
 
@@ -1260,56 +1298,67 @@ class PluginWebViewState extends State<PluginWebView>
   String _generateRainCurtainAPI(String pluginId) {
     return '''
 (function() {
+  function _call(handler, args) {
+    if (!window.flutter_inappwebview) return Promise.resolve(null);
+    return window.flutter_inappwebview.callHandler(handler, args);
+  }
+
   window.RainCurtain = {
     // ========== 元数据 ==========
     pluginId: '$pluginId',
     
-    // ========== 通用存储 API ==========
+    // ========== 结构化存储 API ==========
     storage: {
-      get: async function(key) {
-        if (!window.flutter_inappwebview) return null;
+      insert: async function(table, rows) {
         try {
-          return await window.flutter_inappwebview.callHandler('rc_storage_get', { key });
+          return await _call('rc_storage_insert', { table, rows: Array.isArray(rows) ? rows : [rows] });
         } catch (e) {
-          console.error('RainCurtain.storage.get error:', e);
-          return null;
+          console.error('RainCurtain.storage.insert error:', e);
+          return { insertedCount: 0 };
         }
       },
       
-      set: async function(key, value) {
-        if (!window.flutter_inappwebview) return;
+      query: async function(table, options) {
         try {
-          await window.flutter_inappwebview.callHandler('rc_storage_set', { key, value });
+          return await _call('rc_storage_query', { table, options: options || {} });
         } catch (e) {
-          console.error('RainCurtain.storage.set error:', e);
+          console.error('RainCurtain.storage.query error:', e);
+          return [];
         }
       },
       
-      remove: async function(key) {
-        if (!window.flutter_inappwebview) return;
+      update: async function(table, values, where) {
         try {
-          await window.flutter_inappwebview.callHandler('rc_storage_remove', { key });
+          return await _call('rc_storage_update', { table, values, where: where || null });
         } catch (e) {
-          console.error('RainCurtain.storage.remove error:', e);
+          console.error('RainCurtain.storage.update error:', e);
+          return { updatedCount: 0 };
         }
       },
       
-      clear: async function() {
-        if (!window.flutter_inappwebview) return;
+      delete: async function(table, where) {
         try {
-          await window.flutter_inappwebview.callHandler('rc_storage_clear');
+          return await _call('rc_storage_delete', { table, where: where || null });
+        } catch (e) {
+          console.error('RainCurtain.storage.delete error:', e);
+          return { deletedCount: 0 };
+        }
+      },
+      
+      count: async function(table, where) {
+        try {
+          return await _call('rc_storage_count', { table, where: where || null });
+        } catch (e) {
+          console.error('RainCurtain.storage.count error:', e);
+          return 0;
+        }
+      },
+      
+      clear: async function(table) {
+        try {
+          await _call('rc_storage_clear', { table });
         } catch (e) {
           console.error('RainCurtain.storage.clear error:', e);
-        }
-      },
-      
-      keys: async function() {
-        if (!window.flutter_inappwebview) return [];
-        try {
-          return await window.flutter_inappwebview.callHandler('rc_storage_keys');
-        } catch (e) {
-          console.error('RainCurtain.storage.keys error:', e);
-          return [];
         }
       }
     }
@@ -1393,6 +1442,13 @@ class PluginWebViewState extends State<PluginWebView>
             // 数据库存储
             databaseEnabled: true,
           ),
+          // Android: 当网页请求麦克风/摄像头/地理位置等权限时，直接授权
+          onPermissionRequest: (controller, request) async {
+            return PermissionResponse(
+              resources: request.resources,
+              action: PermissionResponseAction.GRANT,
+            );
+          },
           onWebViewCreated: (controller) {
             webViewController = controller;
             
@@ -1437,132 +1493,245 @@ class PluginWebViewState extends State<PluginWebView>
               },
             );
             
-    // ========== 通用存储 API Handlers ==========
+    // ========== 结构化存储 API Handlers ==========
 
-    // 获取数据 (带输入拦截：溯流模式下变量池优先)
+    // 插入数据 (带输出拦截：溯流模式下匹配 outputMappings 写变量池)
     controller.addJavaScriptHandler(
-      handlerName: 'rc_storage_get',
+      handlerName: 'rc_storage_insert',
       callback: (args) async {
-        if (args.isEmpty) return null;
+        if (args.isEmpty) return {'insertedCount': 0};
         
         final data = args[0] as Map<dynamic, dynamic>;
-        final key = data['key'] as String?;
-        if (key == null) return null;
+        final table = data['table'] as String?;
+        final rowsRaw = data['rows'] as List?;
+        if (table == null || rowsRaw == null) return {'insertedCount': 0};
         
-        // 溯流模式输入拦截：变量池优先
+        final rows = rowsRaw
+            .map((r) => Map<String, dynamic>.from(r as Map))
+            .toList();
+
+        // 溯流模式输出拦截：检查每行数据中的 key 是否匹配 outputMappings
         if (widget.poolId != null && widget.poolPluginId != null && context.mounted) {
           final poolManager = context.read<PoolManager>();
           final pp = poolManager.getPoolPluginById(widget.poolId!, widget.poolPluginId!);
           if (pp != null) {
-            final variableName = pp.inputMappings[key];
-            if (variableName != null) {
-              final variablePoolManager = context.read<VariablePoolManager>();
-              final value = await variablePoolManager.getVariable(widget.poolId!, variableName);
-              if (value != null) return value;
+            for (final row in rows) {
+              for (final entry in row.entries) {
+                final variableName = pp.outputMappings[entry.key];
+                if (variableName != null) {
+                  final variablePoolManager = context.read<VariablePoolManager>();
+                  final type = _inferType(entry.value);
+                  await variablePoolManager.setVariable(
+                    widget.poolId!,
+                    variableName,
+                    type,
+                    entry.value,
+                    sourcePluginId: widget.plugin.id,
+                  );
+                }
+              }
             }
           }
         }
         
-        // 回退到本地存储
-        if (!context.mounted) return null;
+        if (!context.mounted) return {'insertedCount': 0};
         final dataManager = context.read<PluginDataManager>();
-        if (dataManager.isInit) {
-          final localValue = await dataManager.localStorageManager.getItem(widget.plugin.id, key);
-          if (localValue != null) return localValue;
-        }
-
-        // 回退到 manifest 默认值
-        for (final input in widget.plugin.manifest.inputs) {
-          if (input.name == key && input.hasDefault) {
-            return input.defaultValue;
-          }
-        }
+        if (!dataManager.isInit) return {'insertedCount': 0};
         
-        return null;
+        try {
+          final count = await dataManager.pluginStorageManager.insert(
+              widget.plugin.id, table, rows);
+          return {'insertedCount': count};
+        } catch (e) {
+          debugPrint('rc_storage_insert error: $e');
+          return {'insertedCount': 0, 'error': e.toString()};
+        }
       },
     );
 
-    // 设置数据 (带输出拦截：溯流模式下匹配 outputMappings 仅写变量池)
+    // 查询数据 (带输入拦截：溯流模式下变量池优先)
     controller.addJavaScriptHandler(
-      handlerName: 'rc_storage_set',
+      handlerName: 'rc_storage_query',
       callback: (args) async {
-        if (args.isEmpty) return;
+        if (args.isEmpty) return [];
         
         final data = args[0] as Map<dynamic, dynamic>;
-        final key = data['key'] as String?;
-        final value = data['value'];
-        if (key == null) return;
+        final table = data['table'] as String?;
+        if (table == null) return [];
         
-        // 溯流模式输出拦截：匹配 outputMappings 的 key 仅写入变量池
+        final options = data['options'] as Map<dynamic, dynamic>? ?? {};
+        final where = options['where'] != null
+            ? Map<String, dynamic>.from(options['where'] as Map)
+            : null;
+        final orderBy = options['orderBy'] as String?;
+        final limit = options['limit'] as int?;
+        final offset = options['offset'] as int?;
+        
+        // 溯流模式输入拦截：检查 where 中的 key 是否匹配 inputMappings
         if (widget.poolId != null && widget.poolPluginId != null && context.mounted) {
           final poolManager = context.read<PoolManager>();
           final pp = poolManager.getPoolPluginById(widget.poolId!, widget.poolPluginId!);
-          if (pp != null) {
-            final variableName = pp.outputMappings[key];
-            if (variableName != null) {
-              final variablePoolManager = context.read<VariablePoolManager>();
-              final type = _inferType(value);
-              await variablePoolManager.setVariable(
-                widget.poolId!,
-                variableName,
-                type,
-                value,
-                sourcePluginId: widget.plugin.id,
-              );
-              return; // 拦截：不写入本地存储
+          if (pp != null && where != null) {
+            for (final key in where.keys.toList()) {
+              final variableName = pp.inputMappings[key];
+              if (variableName != null) {
+                final variablePoolManager = context.read<VariablePoolManager>();
+                final value = await variablePoolManager.getVariable(widget.poolId!, variableName);
+                if (value != null) {
+                  where[key] = value;
+                }
+              }
             }
           }
         }
         
-        // 非拦截：正常写入本地存储
-        if (!context.mounted) return;
+        if (!context.mounted) return [];
         final dataManager = context.read<PluginDataManager>();
-        if (!dataManager.isInit) return;
+        if (!dataManager.isInit) return [];
         
-        final valueStr = value is String ? value : jsonEncode(value);
-        await dataManager.localStorageManager.setItem(widget.plugin.id, key, valueStr);
+        try {
+          return await dataManager.pluginStorageManager.query(
+            widget.plugin.id,
+            table,
+            where: where,
+            orderBy: orderBy,
+            limit: limit,
+            offset: offset,
+          );
+        } catch (e) {
+          debugPrint('rc_storage_query error: $e');
+          return [];
+        }
+      },
+    );
+
+    // 更新数据
+    controller.addJavaScriptHandler(
+      handlerName: 'rc_storage_update',
+      callback: (args) async {
+        if (args.isEmpty) return {'updatedCount': 0};
+        
+        final data = args[0] as Map<dynamic, dynamic>;
+        final table = data['table'] as String?;
+        final values = data['values'] != null
+            ? Map<String, dynamic>.from(data['values'] as Map)
+            : null;
+        final where = data['where'] != null
+            ? Map<String, dynamic>.from(data['where'] as Map)
+            : null;
+        if (table == null || values == null) return {'updatedCount': 0};
+
+        // 溯流模式输出拦截：检查 values 中的 key 是否匹配 outputMappings
+        if (widget.poolId != null && widget.poolPluginId != null && context.mounted) {
+          final poolManager = context.read<PoolManager>();
+          final pp = poolManager.getPoolPluginById(widget.poolId!, widget.poolPluginId!);
+          if (pp != null) {
+            for (final entry in values.entries) {
+              final variableName = pp.outputMappings[entry.key];
+              if (variableName != null) {
+                final variablePoolManager = context.read<VariablePoolManager>();
+                final type = _inferType(entry.value);
+                await variablePoolManager.setVariable(
+                  widget.poolId!,
+                  variableName,
+                  type,
+                  entry.value,
+                  sourcePluginId: widget.plugin.id,
+                );
+              }
+            }
+          }
+        }
+        
+        if (!context.mounted) return {'updatedCount': 0};
+        final dataManager = context.read<PluginDataManager>();
+        if (!dataManager.isInit) return {'updatedCount': 0};
+        
+        try {
+          final count = await dataManager.pluginStorageManager.update(
+              widget.plugin.id, table, values, where);
+          return {'updatedCount': count};
+        } catch (e) {
+          debugPrint('rc_storage_update error: $e');
+          return {'updatedCount': 0, 'error': e.toString()};
+        }
       },
     );
 
     // 删除数据
     controller.addJavaScriptHandler(
-      handlerName: 'rc_storage_remove',
+      handlerName: 'rc_storage_delete',
+      callback: (args) async {
+        if (args.isEmpty) return {'deletedCount': 0};
+        
+        final data = args[0] as Map<dynamic, dynamic>;
+        final table = data['table'] as String?;
+        final where = data['where'] != null
+            ? Map<String, dynamic>.from(data['where'] as Map)
+            : null;
+        if (table == null) return {'deletedCount': 0};
+        
+        if (!context.mounted) return {'deletedCount': 0};
+        final dataManager = context.read<PluginDataManager>();
+        if (!dataManager.isInit) return {'deletedCount': 0};
+        
+        try {
+          final count = await dataManager.pluginStorageManager.delete(
+              widget.plugin.id, table, where);
+          return {'deletedCount': count};
+        } catch (e) {
+          debugPrint('rc_storage_delete error: $e');
+          return {'deletedCount': 0, 'error': e.toString()};
+        }
+      },
+    );
+
+    // 计数
+    controller.addJavaScriptHandler(
+      handlerName: 'rc_storage_count',
+      callback: (args) async {
+        if (args.isEmpty) return 0;
+        
+        final data = args[0] as Map<dynamic, dynamic>;
+        final table = data['table'] as String?;
+        final where = data['where'] != null
+            ? Map<String, dynamic>.from(data['where'] as Map)
+            : null;
+        if (table == null) return 0;
+        
+        if (!context.mounted) return 0;
+        final dataManager = context.read<PluginDataManager>();
+        if (!dataManager.isInit) return 0;
+        
+        try {
+          return await dataManager.pluginStorageManager.count(
+              widget.plugin.id, table, where);
+        } catch (e) {
+          debugPrint('rc_storage_count error: $e');
+          return 0;
+        }
+      },
+    );
+
+    // 清空表
+    controller.addJavaScriptHandler(
+      handlerName: 'rc_storage_clear',
       callback: (args) async {
         if (args.isEmpty) return;
         
         final data = args[0] as Map<dynamic, dynamic>;
-        final key = data['key'] as String?;
-        if (key == null) return;
+        final table = data['table'] as String?;
+        if (table == null) return;
         
         if (!context.mounted) return;
         final dataManager = context.read<PluginDataManager>();
         if (!dataManager.isInit) return;
         
-        await dataManager.localStorageManager.removeItem(widget.plugin.id, key);
-      },
-    );
-
-    // 清空所有数据
-    controller.addJavaScriptHandler(
-      handlerName: 'rc_storage_clear',
-      callback: (args) async {
-        if (!context.mounted) return;
-        final dataManager = context.read<PluginDataManager>();
-        if (!dataManager.isInit) return;
-        
-        await dataManager.localStorageManager.clearLocalStorage(widget.plugin.id);
-      },
-    );
-
-    // 获取所有键
-    controller.addJavaScriptHandler(
-      handlerName: 'rc_storage_keys',
-      callback: (args) async {
-        if (!context.mounted) return [];
-        final dataManager = context.read<PluginDataManager>();
-        if (!dataManager.isInit) return [];
-        
-        return await dataManager.localStorageManager.getKeys(widget.plugin.id);
+        try {
+          await dataManager.pluginStorageManager.clear(widget.plugin.id, table);
+        } catch (e) {
+          debugPrint('rc_storage_clear error: $e');
+        }
       },
     );
 
@@ -1573,6 +1742,7 @@ class PluginWebViewState extends State<PluginWebView>
                 if (args.isEmpty) {
                   return {
                     'ok': false,
+                    'success': false,
                     'error': 'Missing request payload',
                   };
                 }
@@ -1586,9 +1756,20 @@ class PluginWebViewState extends State<PluginWebView>
                 final bool wantsStream = data['stream'] == true;
                 final String requestId = data['requestId'] as String? ?? 'unknown';
 
+                // DEBUG: 记录收到的请求
+                String bodyKindDbg = 'none';
+                int bodyLenDbg = 0;
+                if (bodyData is Map) {
+                  bodyKindDbg = bodyData['kind']?.toString() ?? 'unknown';
+                  final d = bodyData['data'];
+                  if (d is String) bodyLenDbg = d.length;
+                }
+                debugPrint('[raincurtain_fetch] received: method=$method url=$url bodyKind=$bodyKindDbg bodyLen=$bodyLenDbg reqId=$requestId');
+
                 if (url.isEmpty) {
                   return {
                     'ok': false,
+                    'success': false,
                     'error': 'Empty URL',
                   };
                 }
@@ -1613,6 +1794,7 @@ class PluginWebViewState extends State<PluginWebView>
                       final responseHeaders = cached.headers;
                       return {
                         'ok': cached.statusCode >= 200 && cached.statusCode < 300,
+                        'success': true, // 缓存命中也算成功
                         'status': cached.statusCode,
                         'statusText': cached.reasonPhrase ?? '',
                         'headers': responseHeaders,
@@ -1632,6 +1814,16 @@ class PluginWebViewState extends State<PluginWebView>
                     if (kind == 'text' && payload != null) {
                       final req = http.Request(method, Uri.parse(url));
                       req.body = payload.toString();
+                      request = req;
+                    } else if (kind == 'base64-text' && payload is String) {
+                      // JS 侧将文本 body 编码为 base64 传输（避免 data: URI 触发 bridge 限制）
+                      final req = http.Request(method, Uri.parse(url));
+                      try {
+                        req.bodyBytes = base64Decode(payload);
+                      } catch (decodeErr) {
+                        debugPrint('[raincurtain_fetch] base64-text decode failed: $decodeErr, payloadLen=${payload.length}');
+                        rethrow;
+                      }
                       request = req;
                     } else if (kind == 'base64' && payload is String) {
                       final req = http.Request(method, Uri.parse(url));
@@ -1682,6 +1874,7 @@ class PluginWebViewState extends State<PluginWebView>
                     // Note: cannot return body here, it's a stream
                     final result = {
                       'ok': streamedResponse.statusCode >= 200 && streamedResponse.statusCode < 300,
+                      'success': true, // 流式响应成功建立
                       'status': streamedResponse.statusCode,
                       'statusText': streamedResponse.reasonPhrase ?? '',
                       'headers': responseHeaders,
@@ -1747,19 +1940,22 @@ class PluginWebViewState extends State<PluginWebView>
 
                   return {
                     'ok': response.statusCode >= 200 && response.statusCode < 300,
+                    'success': true, // 网络层成功（有 HTTP 响应）
                     'status': response.statusCode,
                     'statusText': response.reasonPhrase ?? '',
                     'headers': responseHeaders,
                     'bodyBase64': base64Encode(response.bodyBytes),
                     'streaming': false,
                   };
-                } catch (e) {
-                  // 请求失败或被取消
+                } catch (e, st) {
+                  // 请求失败或被取消（网络层失败）
+                  debugPrint('[raincurtain_fetch] error reqId=$requestId: $e\n$st');
                   metrics.fail(e.toString());
                   metrics.log();
                   _requestMetrics.remove(requestId);
                   return {
                     'ok': false,
+                    'success': false, // 网络层失败
                     'error': e.toString(),
                   };
                 } finally {

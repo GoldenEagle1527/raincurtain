@@ -1,29 +1,29 @@
-import 'dart:io';
 import 'package:flutter/foundation.dart';
-import 'package:path/path.dart' as p;
-import 'package:path_provider/path_provider.dart';
 
-import 'localstorage_manager.dart';
+import 'database_manager.dart';
+import 'plugin_storage_manager.dart';
 
 /// 插件数据统计信息
 class PluginDataStats {
-  final int localStorageSize;
-  final int localStorageItemCount;
+  final int storageSize;
+  final int storageItemCount;
 
   PluginDataStats({
-    required this.localStorageSize,
-    required this.localStorageItemCount,
+    required this.storageSize,
+    required this.storageItemCount,
   });
 
-  int get totalSize => localStorageSize;
-  int get totalItems => localStorageItemCount;
+  int get totalSize => storageSize;
+  int get totalItems => storageItemCount;
 }
 
 /// 插件数据管理器
-/// 管理 LocalStorage 数据（Cookie 存储已移除）
+/// 管理插件的结构化存储数据
 class PluginDataManager extends ChangeNotifier {
-  late Directory dataDir;
-  late LocalStorageManager localStorageManager;
+  late PluginStorageManager pluginStorageManager;
+
+  /// 数据库文件所在目录路径（用于 UI 显示）
+  String get dataDir => DatabaseManager.instance.dbDirectoryPath;
 
   bool _isInit = false;
   bool get isInit => _isInit;
@@ -34,18 +34,13 @@ class PluginDataManager extends ChangeNotifier {
 
   Future<void> _init() async {
     try {
-      final supportDir = await getApplicationSupportDirectory();
-      dataDir = Directory(p.join(supportDir.path, 'RainCurtainPluginsData'));
-
-      final localStorageDir = Directory(p.join(dataDir.path, 'localstorage'));
-      await localStorageDir.create(recursive: true);
-
-      localStorageManager = LocalStorageManager(storageDir: localStorageDir);
+      final db = DatabaseManager.database;
+      pluginStorageManager = PluginStorageManager(database: db);
 
       _isInit = true;
       notifyListeners();
 
-      debugPrint('PluginDataManager initialized at: ${dataDir.path}');
+      debugPrint('PluginDataManager initialized (SQLite)');
     } catch (e, stackTrace) {
       debugPrint('PluginDataManager init failed: $e');
       debugPrintStack(stackTrace: stackTrace);
@@ -55,26 +50,26 @@ class PluginDataManager extends ChangeNotifier {
 
   /// 获取插件的总数据大小
   Future<int> getTotalSizeForPlugin(String pluginId) async {
-    return localStorageManager.getLocalStorageSize(pluginId);
+    return pluginStorageManager.getStorageSize(pluginId);
   }
 
   /// 获取插件的数据统计
   Future<PluginDataStats> getStatsForPlugin(String pluginId) async {
-    final localStorageSize =
-        await localStorageManager.getLocalStorageSize(pluginId);
-    final localStorageItemCount =
-        await localStorageManager.getLocalStorageItemCount(pluginId);
+    final storageSize =
+        await pluginStorageManager.getStorageSize(pluginId);
+    final storageItemCount =
+        await pluginStorageManager.getStorageItemCount(pluginId);
 
     return PluginDataStats(
-      localStorageSize: localStorageSize,
-      localStorageItemCount: localStorageItemCount,
+      storageSize: storageSize,
+      storageItemCount: storageItemCount,
     );
   }
 
   /// 获取所有插件的数据统计
   Future<Map<String, PluginDataStats>> getAllPluginsDataStats() async {
     final stats = <String, PluginDataStats>{};
-    final storagePluginIds = await localStorageManager.getAllPluginIds();
+    final storagePluginIds = await pluginStorageManager.getAllPluginIds();
 
     for (final pluginId in storagePluginIds) {
       stats[pluginId] = await getStatsForPlugin(pluginId);
@@ -83,16 +78,16 @@ class PluginDataManager extends ChangeNotifier {
     return stats;
   }
 
-  /// 清除插件的所有数据
+  /// 清除插件的所有存储数据
   Future<void> clearAllDataForPlugin(String pluginId) async {
-    await clearLocalStorageForPlugin(pluginId);
+    await clearStorageForPlugin(pluginId);
   }
 
-  /// 清除插件的 LocalStorage 数据
-  Future<void> clearLocalStorageForPlugin(String pluginId) async {
-    await localStorageManager.clearLocalStorage(pluginId);
+  /// 清除插件的存储数据（删除所有表）
+  Future<void> clearStorageForPlugin(String pluginId) async {
+    await pluginStorageManager.dropTablesForPlugin(pluginId);
     notifyListeners();
-    debugPrint('LocalStorage cleared for plugin: $pluginId');
+    debugPrint('Storage cleared for plugin: $pluginId');
   }
 
   /// 清除所有插件的数据
@@ -107,7 +102,7 @@ class PluginDataManager extends ChangeNotifier {
 
   /// 获取所有插件 ID
   Future<Set<String>> getAllPluginIds() async {
-    final storagePluginIds = await localStorageManager.getAllPluginIds();
+    final storagePluginIds = await pluginStorageManager.getAllPluginIds();
     return {...storagePluginIds};
   }
 

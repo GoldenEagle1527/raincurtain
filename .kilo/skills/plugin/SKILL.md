@@ -36,7 +36,7 @@ manifest.yml 的完整格式、字段定义和示例参见 `references/manifest.
 
 ### 2. 编写 HTML 入口
 
-创建 `index.html`，按依赖顺序加载 JS 文件（utils → state → api → ui → app），或使用 `<script type="module">`。
+创建 `index.html`，使用语义化标签定义页面骨架。对于复杂插件，可以按分区组织（如页面骨架 → 弹窗层）。合理引入所需的 CSS 和 JS。*详见后续代码架构建议。*
 
 ### 3. 应用 UI 主题
 
@@ -48,15 +48,18 @@ manifest.yml 的完整格式、字段定义和示例参见 `references/manifest.
 
 ### 5. 组织代码架构
 
-按职责拆分 JS 文件，遵循职责分离原则。架构模式和完整示例参见 `references/architecture.md`。
+根据插件规模决定代码拆分粒度。简单插件可以合并文件，复杂插件推荐按功能领域拆分以提升可维护性。*详见后续代码架构建议。*
 
 ## 关键 API 速查
 
 ```javascript
-// 数据存储
-await RainCurtain.storage.get(key)       // 读取（自动回退到 manifest default）
-await RainCurtain.storage.set(key, val)  // 保存
-await RainCurtain.storage.remove(key)    // 删除
+// 结构化存储（需在 manifest.yml 中声明 storage 表结构）
+await RainCurtain.storage.insert('table', { col: val })       // 插入
+await RainCurtain.storage.query('table', { where, orderBy, limit, offset })  // 查询
+await RainCurtain.storage.update('table', values, where)      // 更新
+await RainCurtain.storage.delete('table', where)              // 删除
+await RainCurtain.storage.count('table', where)               // 计数
+await RainCurtain.storage.clear('table')                      // 清空表
 
 // 网络请求（系统自动绕过 CORS）
 const resp = await fetch('https://api.example.com/data')
@@ -69,31 +72,22 @@ new Notification("标题", { body: "内容" })
 await navigator.clipboard.writeText("文本")
 ```
 
-## 代码架构要求
+## 代码架构建议
 
-### 文件拆分（必须）
+### 灵活的目录结构与代码组织
 
-禁止将所有逻辑写入单个 JS 文件。按职责边界拆分，每个文件只承担一个明确的职责领域。拆分粒度根据实际复杂度决定：
+*   根据插件复杂度合理组织代码。对于功能简单的极简插件，将所有逻辑写在少数几个文件甚至单文件（HTML+JS+CSS）中是完全可以接受的，避免过度设计。
+*   对于复杂的插件，推荐按功能模块或组件将 JS 和 CSS 进行合理拆分，以保持代码可读性和可维护性。例如，将 API 请求、状态管理、UI 渲染分离。
+*   **CSS 组织建议：** 推荐使用清晰且模块化的 CSS 类名（如 BEM 命名风格）以避免样式冲突。优先使用系统注入的 MD3 主题变量（`--md-*`）来定义颜色、圆角、阴影等，确保系统主题适配。
 
-- **单个文件超过 200 行时**，审视其是否承担了多个职责，若是则继续拆分
-- **同一职责领域内存在多个独立子模块时**（如多个不同的 API 端点、多个独立的 UI 面板），按子模块进一步拆分为独立文件
-- **入口文件**始终独立，仅负责初始化、事件绑定和模块协调，不包含具体业务逻辑
+### HTML/CSS/JS 实践指南
 
-拆分判断依据是职责边界而非固定模板。典型的职责领域包括但不限于：工具函数、状态管理、数据获取与持久化、DOM 渲染、业务流程协调。根据插件实际复杂度，这些领域可能合并（简单插件）或进一步细分（复杂插件）。
+*   **DOM 操作：** 推荐使用 `document.createElement` 来构建复杂的 DOM 结构，保持代码的结构化。如果使用 `innerHTML` 拼接动态内容，必须注意防范 XSS 注入风险。
+*   **全局污染：** 尽量避免将函数挂载到 `window` 对象，推荐使用模块化导出或在作用域内绑定事件。但在特定的宿主环境交互中，如确有必要也可使用。
+*   **语义化：** 尽可能使用语义化的 HTML 标签，如 `<header>`、`<main>`、`<button>` 等。
+*   **分离关注点：** 尽量保持 HTML（结构）、CSS（样式）和 JS（行为）的清晰分离，避免过度使用内联样式或内联事件。
 
-`references/architecture.md` 中提供了一个中等复杂度插件的拆分示例供参考，但不应机械套用。
-
-### 核心规则
-
-- 数据操作函数禁止直接操作 DOM
-- UI 渲染函数禁止直接调用 API 或操作持久化存储
-- 禁止使用 `innerHTML` 拼接动态内容，使用 `document.createElement` 构建 DOM
-- 禁止将函数挂载到 `window` 对象，使用 `addEventListener` 绑定事件
-- 每个函数只完成一个职责，函数体不超过 30 行
-- 提取魔法数字和重复字符串为命名常量
-- 状态变更通过专用函数，禁止直接赋值修改 state 属性
-
-完整代码骨架、正反模式对比参见 `references/architecture.md`。
+*对于极其复杂的大型插件，如果需要更严谨的代码架构模板参考，可以查阅 `references/architecture.md`，但这并非强制要求。*
 
 ## 平台兼容性
 
@@ -104,20 +98,9 @@ await navigator.clipboard.writeText("文本")
 
 ## 开发检查清单
 
-- [ ] 使用浏览器原生 API（非 Node.js 模块）
-- [ ] 所有异步操作用 `try/catch` 包裹
-- [ ] 使用 CSS 变量实现主题适配
-- [ ] 使用系统全局字体（非必要禁止自定义字体）
-- [ ] 所有资源本地引用（禁止 CDN）
-- [ ] manifest.yml 版本号符合 X.Y.Z 格式
-- [ ] manifest.yml 定义了 inputs 和 outputs（即使为空列表 `[]`）
-- [ ] 所有 input 都有 default 值
-- [ ] object 类型已定义 schema，array 类型已定义 items
-- [ ] 响应式布局适配桌面和移动端
-- [ ] 同时支持触摸和鼠标操作
-- [ ] 使用 RainCurtain.storage API 而非原生 localStorage
-- [ ] JS 代码按职责边界拆分，单文件不超过 200 行
-- [ ] 数据操作函数不直接操作 DOM
-- [ ] 使用 createElement 构建 DOM，使用 addEventListener 绑定事件
-- [ ] 每个函数职责单一，函数体不超过 30 行
-- [ ] 无魔法数字和重复字符串，常量已提取命名
+- [ ] 仅使用浏览器原生 API，未使用任何 Node.js 模块。
+- [ ] 仅使用本地资源（禁止 CDN），未使用自定义字体。
+- [ ] 数据存储使用了 `RainCurtain.storage` API 而非原生 `localStorage`。
+- [ ] 成功接入了系统 MD3 CSS 主题变量。
+- [ ] `manifest.yml` 配置完整（包含输入输出及默认值，版本号格式正确）。
+- [ ] 确保在桌面和移动端（触摸与鼠标）均有良好的响应式适配。

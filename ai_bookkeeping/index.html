@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI记账</title>
+  <link rel="stylesheet" href="styles/base.css">
+  <link rel="stylesheet" href="styles/layout.css">
+  <link rel="stylesheet" href="styles/components.css">
+  <link rel="stylesheet" href="styles/pages.css">
+</head>
+<body>
+  <div class="app">
+    <!-- 顶部 Tab 栏 -->
+    <nav class="tab-bar">
+      <button class="tab-btn is-active" data-tab="home">
+        <span class="material-icons">home</span>
+        <span>首页</span>
+      </button>
+      <button class="tab-btn" data-tab="stats">
+        <span class="material-icons">bar_chart</span>
+        <span>统计</span>
+      </button>
+      <button class="tab-btn" data-tab="settings">
+        <span class="material-icons">settings</span>
+        <span>设置</span>
+      </button>
+    </nav>
+
+    <div class="app__main">
+      <!-- 首页 -->
+      <div id="page-home" class="page is-active">
+        <div id="wallet-card" class="home-wallet">
+          <div class="home-wallet__label">钱包余额</div>
+          <div id="wallet-amount" class="home-wallet__amount">¥0.00</div>
+        </div>
+        <div>
+          <div class="home-today__header">
+            <span>今日记录</span>
+            <span id="today-summary" class="home-today__summary"></span>
+          </div>
+          <div id="today-records"></div>
+        </div>
+      </div>
+
+      <!-- 统计页 -->
+      <div id="page-stats" class="page">
+        <div class="stats-filters">
+          <div id="granularity-group" class="chip-group">
+            <button class="chip" data-granularity="day">日</button>
+            <button class="chip" data-granularity="week">周</button>
+            <button class="chip is-active" data-granularity="month">月</button>
+          </div>
+          <div id="stats-type-group" class="chip-group">
+            <button class="chip is-active" data-stype="expense">支出</button>
+            <button class="chip" data-stype="income">收入</button>
+          </div>
+        </div>
+        <div id="stats-summary" class="stats-summary"></div>
+        <div class="stats-chart">
+          <div class="stats-chart__title">分类统计</div>
+          <div class="stats-chart__wrap stats-chart__wrap--pie">
+            <canvas id="pie-chart"></canvas>
+          </div>
+        </div>
+        <div class="stats-chart">
+          <div class="stats-chart__title">趋势</div>
+          <div class="stats-chart__wrap stats-chart__wrap--line">
+            <canvas id="line-chart"></canvas>
+          </div>
+        </div>
+      </div>
+
+      <!-- 设置页 -->
+      <div id="page-settings" class="page">
+        <div class="settings-section">
+          <div class="settings-section__title">钱包余额</div>
+          <div class="settings-field">
+            <input id="settings-balance" class="input" type="number" placeholder="输入钱包余额">
+            <button id="btn-save-balance" class="btn btn--primary btn--sm">保存</button>
+          </div>
+          <div class="settings-info">设置钱包初始余额，后续记账会自动更新余额。</div>
+        </div>
+        <div class="settings-section">
+          <div class="settings-section__title">数据概览</div>
+          <div id="settings-stats" class="settings-stats"></div>
+        </div>
+        <div class="settings-section">
+          <div class="settings-section__title">数据管理</div>
+          <button id="btn-clear-data" class="btn btn--outline btn--sm" style="color: var(--md-error);">
+            <span class="material-icons" style="font-size: 16px;">delete_forever</span>
+            清除所有记录
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 底部输入栏 -->
+    <div class="input-bar">
+      <!-- 支出/收入切换 -->
+      <div class="input-bar__type">
+        <button id="type-expense" class="chip is-active" data-type="expense">支出</button>
+        <button id="type-income" class="chip" data-type="income">收入</button>
+      </div>
+
+      <!-- 表单区域 -->
+      <div class="input-bar__form">
+        <div class="input-bar__form-row">
+          <input id="form-item" class="input input--sm" placeholder="项目名">
+          <input id="form-amount" class="input input--sm" type="number" placeholder="¥ 金额" step="0.01">
+        </div>
+        <div class="input-bar__form-row">
+          <select id="form-category" class="select select--sm">
+            <!-- 由 JS 动态填充 -->
+          </select>
+          <input id="form-note" class="input input--sm" placeholder="备注 (可选)">
+        </div>
+      </div>
+
+      <!-- AI 输入行 -->
+      <div class="input-bar__ai-row">
+        <input id="ai-input" class="input input--sm" placeholder="AI: 描述消费或收入...">
+        <button id="btn-voice" class="btn btn--icon btn--sm-icon btn--voice" title="语音输入">
+          <span class="material-icons">mic</span>
+        </button>
+        <button id="btn-ai-send" class="btn btn--primary btn--icon btn--sm-icon" title="AI解析">
+          <span class="material-icons">auto_fix_high</span>
+        </button>
+      </div>
+
+      <!-- 记账按钮 -->
+      <button id="btn-submit" class="btn btn--primary btn--full">记账</button>
+    </div>
+
+    <!-- AI 加载模态框 -->
+    <div id="ai-loading-modal" class="modal hidden">
+      <div class="modal__backdrop"></div>
+      <div class="modal__content">
+        <div class="loading-dots">
+          <div class="loading-dots__dot"></div>
+          <div class="loading-dots__dot"></div>
+          <div class="loading-dots__dot"></div>
+        </div>
+        <div id="modal-text" class="modal__text">AI 正在解析...</div>
+        <div class="modal__actions hidden" id="modal-actions">
+          <button id="modal-retry-btn" class="btn btn--primary btn--sm">重试</button>
+          <button id="modal-close-btn" class="btn btn--outline btn--sm">关闭</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Toast 容器 -->
+    <div id="toast-container" class="toast-container"></div>
+  </div>
+
+  <script src="lib/chart.umd.min.js"></script>
+  <script src="scripts/utils.js"></script>
+  <script src="scripts/state.js"></script>
+  <script src="scripts/api.js"></script>
+  <script src="scripts/voice.js"></script>
+  <script src="scripts/chart.js"></script>
+  <script src="scripts/ui.js"></script>
+  <script src="scripts/ui-stats.js"></script>
+  <script src="scripts/app.js"></script>
+</body>
+</html>

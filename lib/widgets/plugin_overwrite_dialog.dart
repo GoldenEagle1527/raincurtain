@@ -64,7 +64,7 @@ class PluginOverwriteDialog extends StatelessWidget {
           Text(versionInfo),
           const SizedBox(height: 12),
           Text(
-            '覆盖安装将保留插件数据（Cookie、LocalStorage）',
+            '覆盖安装将保留插件数据（LocalStorage）',
             style: TextStyle(
               fontSize: 12,
               color: colorScheme.onSurfaceVariant,

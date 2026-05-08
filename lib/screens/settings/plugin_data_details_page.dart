@@ -4,7 +4,7 @@ import 'package:provider/provider.dart';
 import '../../models/plugin_data_manager.dart';
 
 /// 插件数据详情页面
-/// 显示单个插件的 LocalStorage 详细数据
+/// 显示单个插件的存储表及其数据行
 class PluginDataDetailsPage extends StatelessWidget {
   final String pluginId;
   final String pluginName;
@@ -21,16 +21,16 @@ class PluginDataDetailsPage extends StatelessWidget {
       appBar: AppBar(
         title: Text(pluginName),
       ),
-      body: LocalStorageDetailsView(pluginId: pluginId),
+      body: StorageDetailsView(pluginId: pluginId),
     );
   }
 }
 
-/// LocalStorage 详情视图
-class LocalStorageDetailsView extends StatelessWidget {
+/// 存储详情视图
+class StorageDetailsView extends StatelessWidget {
   final String pluginId;
 
-  const LocalStorageDetailsView({super.key, required this.pluginId});
+  const StorageDetailsView({super.key, required this.pluginId});
 
   @override
   Widget build(BuildContext context) {
@@ -40,8 +40,8 @@ class LocalStorageDetailsView extends StatelessWidget {
       return const Center(child: CircularProgressIndicator());
     }
 
-    return FutureBuilder<Map<String, dynamic>>(
-      future: dataManager.localStorageManager.loadLocalStorage(pluginId),
+    return FutureBuilder<List<String>>(
+      future: dataManager.pluginStorageManager.getShortTableNames(pluginId),
       builder: (context, snapshot) {
         if (snapshot.connectionState == ConnectionState.waiting) {
           return const Center(child: CircularProgressIndicator());
@@ -73,9 +73,9 @@ class LocalStorageDetailsView extends StatelessWidget {
           );
         }
 
-        final storage = snapshot.data ?? {};
+        final tableNames = snapshot.data ?? [];
 
-        if (storage.isEmpty) {
+        if (tableNames.isEmpty) {
           return Center(
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
@@ -87,7 +87,7 @@ class LocalStorageDetailsView extends StatelessWidget {
                 ),
                 const SizedBox(height: 16),
                 Text(
-                  '暂无 LocalStorage 数据',
+                  '暂无存储数据',
                   style: Theme.of(context).textTheme.titleMedium,
                 ),
               ],
@@ -97,56 +97,139 @@ class LocalStorageDetailsView extends StatelessWidget {
 
         return ListView.builder(
           padding: const EdgeInsets.all(16),
-          itemCount: storage.length,
+          itemCount: tableNames.length,
           itemBuilder: (context, index) {
-            final key = storage.keys.elementAt(index);
-            final value = storage[key].toString();
-
-            return Card(
-              margin: const EdgeInsets.only(bottom: 8),
-              child: ExpansionTile(
-                title: Text(
-                  key,
-                  style: const TextStyle(fontWeight: FontWeight.w600),
-                ),
-                subtitle: Text(
-                  value.length > 50 ? '${value.substring(0, 50)}...' : value,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        fontFamily: 'monospace',
-                      ),
-                ),
-                children: [
-                  Padding(
-                    padding: const EdgeInsets.all(16),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        _DataRow(
-                          label: '键',
-                          value: key,
-                          onCopy: () => _copyToClipboard(context, key),
-                        ),
-                        _DataRow(
-                          label: '值',
-                          value: value,
-                          onCopy: () => _copyToClipboard(context, value),
-                        ),
-                        _DataRow(
-                          label: '大小',
-                          value: '${value.length} 字符',
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
+            return _StorageTableCard(
+              pluginId: pluginId,
+              tableName: tableNames[index],
             );
           },
         );
       },
     );
+  }
+}
+
+/// 单个存储表卡片
+class _StorageTableCard extends StatelessWidget {
+  final String pluginId;
+  final String tableName;
+
+  const _StorageTableCard({
+    required this.pluginId,
+    required this.tableName,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final dataManager = context.watch<PluginDataManager>();
+
+    return Card(
+      margin: const EdgeInsets.only(bottom: 12),
+      child: FutureBuilder<List<Map<String, dynamic>>>(
+        future: dataManager.pluginStorageManager.query(
+          pluginId,
+          tableName,
+          limit: 100,
+        ),
+        builder: (context, snapshot) {
+          final rows = snapshot.data ?? [];
+          final isLoading =
+              snapshot.connectionState == ConnectionState.waiting;
+
+          return ExpansionTile(
+            title: Text(
+              tableName,
+              style: const TextStyle(fontWeight: FontWeight.w600),
+            ),
+            subtitle: isLoading
+                ? const Text('加载中...')
+                : Text('${rows.length} 行'),
+            children: [
+              if (isLoading)
+                const Padding(
+                  padding: EdgeInsets.all(16),
+                  child: Center(child: CircularProgressIndicator()),
+                )
+              else if (rows.isEmpty)
+                Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Text(
+                    '表中暂无数据',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color:
+                              Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
+                  ),
+                )
+              else ...[
+                // 数据行列表
+                ...rows.map((row) => _DataRowTile(row: row)),
+              ],
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
+/// 数据行展示
+class _DataRowTile extends StatelessWidget {
+  final Map<String, dynamic> row;
+
+  const _DataRowTile({required this.row});
+
+  @override
+  Widget build(BuildContext context) {
+    final id = row['_id']?.toString() ?? '?';
+    final entries = row.entries.where((e) => e.key != '_id').toList();
+    final preview = entries
+        .take(3)
+        .map((e) => '${e.key}: ${_formatValue(e.value)}')
+        .join(', ');
+    final suffix = entries.length > 3 ? ', ...' : '';
+
+    return ExpansionTile(
+      tilePadding: const EdgeInsets.symmetric(horizontal: 24),
+      title: Text(
+        '#$id',
+        style: const TextStyle(
+          fontWeight: FontWeight.w500,
+          fontSize: 14,
+        ),
+      ),
+      subtitle: Text(
+        '$preview$suffix',
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+              fontFamily: 'monospace',
+            ),
+      ),
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(left: 24, right: 24, bottom: 12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: entries
+                .map((e) => _FieldRow(
+                      label: e.key,
+                      value: _formatValue(e.value),
+                      onCopy: () => _copyToClipboard(
+                          context, _formatValue(e.value)),
+                    ))
+                .toList(),
+          ),
+        ),
+      ],
+    );
+  }
+
+  String _formatValue(dynamic value) {
+    if (value == null) return 'null';
+    if (value is bool) return value.toString();
+    return value.toString();
   }
 
   void _copyToClipboard(BuildContext context, String text) {
@@ -160,13 +243,13 @@ class LocalStorageDetailsView extends StatelessWidget {
   }
 }
 
-/// 数据行组件
-class _DataRow extends StatelessWidget {
+/// 字段行组件
+class _FieldRow extends StatelessWidget {
   final String label;
   final String value;
   final VoidCallback? onCopy;
 
-  const _DataRow({
+  const _FieldRow({
     required this.label,
     required this.value,
     this.onCopy,
@@ -175,12 +258,12 @@ class _DataRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.only(bottom: 8),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           SizedBox(
-            width: 80,
+            width: 100,
             child: Text(
               label,
               style: Theme.of(context).textTheme.bodySmall?.copyWith(

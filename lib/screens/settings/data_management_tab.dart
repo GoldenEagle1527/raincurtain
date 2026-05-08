@@ -81,7 +81,7 @@ class _DataManagementTabState extends State<DataManagementTab> {
       );
     }
 
-    final storagePath = dataManager.dataDir.path;
+    final storagePath = dataManager.dataDir;
 
     return Card(
       child: ListTile(
@@ -184,7 +184,7 @@ class _DataManagementTabState extends State<DataManagementTab> {
               ),
               const SizedBox(height: 8),
               Text(
-                '插件使用 LocalStorage 后会在此显示',
+                '插件使用存储后会在此显示',
                 style: Theme.of(context).textTheme.bodySmall?.copyWith(
                       color: Theme.of(context).colorScheme.onSurfaceVariant,
                     ),
@@ -228,7 +228,7 @@ class _DataManagementTabState extends State<DataManagementTab> {
               children: [
                 ListTile(
                   leading: const Icon(Icons.storage),
-                  title: const Text('LocalStorage'),
+                  title: const Text('存储数据'),
                   trailing: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
@@ -236,10 +236,10 @@ class _DataManagementTabState extends State<DataManagementTab> {
                         mainAxisAlignment: MainAxisAlignment.center,
                         crossAxisAlignment: CrossAxisAlignment.end,
                         children: [
-                          Text('${stats.localStorageItemCount} 项'),
+                          Text('${stats.storageItemCount} 项'),
                           Text(
                             PluginDataManager.formatBytes(
-                                stats.localStorageSize),
+                                stats.storageSize),
                             style: Theme.of(context).textTheme.bodySmall,
                           ),
                         ],
@@ -251,9 +251,9 @@ class _DataManagementTabState extends State<DataManagementTab> {
                           context,
                           pluginId,
                           plugin?.name ?? '未知插件',
-                          'LocalStorage',
+                          '存储数据',
                         ),
-                        tooltip: '清除 LocalStorage',
+                        tooltip: '清除存储数据',
                       ),
                     ],
                   ),
@@ -331,7 +331,7 @@ class _DataManagementTabState extends State<DataManagementTab> {
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('确认清除全部数据'),
-        content: Text('确定要清除 "$pluginName" 的所有 LocalStorage 数据吗？此操作不可撤销。'),
+        content: Text('确定要清除 "$pluginName" 的所有存储数据吗？此操作不可撤销。'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
@@ -392,7 +392,7 @@ class _DataManagementTabState extends State<DataManagementTab> {
 
     if (confirmed == true && context.mounted) {
       final dataManager = context.read<PluginDataManager>();
-      await dataManager.clearLocalStorageForPlugin(pluginId);
+      await dataManager.clearStorageForPlugin(pluginId);
       await _loadDataStats();
 
       if (context.mounted) {

@@ -6,12 +6,14 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:uuid/uuid.dart';
 import 'package:yaml/yaml.dart';
 
+import 'database_manager.dart';
 import 'plugin_manifest.dart';
 import 'plugin_icon.dart';
+import 'plugin_storage_manager.dart';
 
 class LocalPlugin {
   final String entryPath;
@@ -62,6 +64,8 @@ class PluginManager extends ChangeNotifier {
 
   late Directory sandboxDir;
   final Uuid _uuid = const Uuid();
+  late Database _db;
+  late PluginStorageManager _storageManager;
 
   PluginManager() {
     _init();
@@ -69,6 +73,9 @@ class PluginManager extends ChangeNotifier {
 
   Future<void> _init() async {
     try {
+      _db = DatabaseManager.database;
+      _storageManager = PluginStorageManager(database: _db);
+
       final supportDir = await getApplicationSupportDirectory();
       sandboxDir = Directory(p.join(supportDir.path, 'RainCurtainPlugins'));
       if (!await sandboxDir.exists()) {
@@ -94,15 +101,11 @@ class PluginManager extends ChangeNotifier {
   }
 
   Future<void> _loadPlugins() async {
-    final prefs = await SharedPreferences.getInstance();
-    final pluginsJson = prefs.getString('saved_plugins');
-    if (pluginsJson == null) return;
-
-    final List<dynamic> decoded = jsonDecode(pluginsJson);
+    final rows = await _db.query('plugins');
     final List<LocalPlugin> loaded = [];
 
-    for (final e in decoded) {
-      final entryPath = (e['entryPath'] ?? '').toString();
+    for (final row in rows) {
+      final entryPath = row['entry_path'] as String;
       if (entryPath.isEmpty) continue;
 
       try {
@@ -117,6 +120,12 @@ class PluginManager extends ChangeNotifier {
 
         final manifest = await _readManifest(manifestFile);
         loaded.add(LocalPlugin(entryPath: entryPath, manifest: manifest));
+
+        // 确保插件的存储表存在
+        if (manifest.storage.isNotEmpty) {
+          await _storageManager.ensureTablesForPlugin(
+              manifest.id, manifest.storage);
+        }
       } catch (err) {
         debugPrint('Failed to load plugin ($entryPath): $err');
       }
@@ -126,9 +135,19 @@ class PluginManager extends ChangeNotifier {
   }
 
   Future<void> _savePlugins() async {
-    final prefs = await SharedPreferences.getInstance();
-    final pluginsJson = jsonEncode(_plugins.map((e) => e.toJson()).toList());
-    await prefs.setString('saved_plugins', pluginsJson);
+    await _db.transaction((txn) async {
+      // 清空后重新插入
+      await txn.delete('plugins');
+      final batch = txn.batch();
+      for (final plugin in _plugins) {
+        batch.insert('plugins', {
+          'plugin_id': plugin.id,
+          'entry_path': plugin.entryPath,
+          'manifest_json': jsonEncode(plugin.manifest.toJson()),
+        });
+      }
+      await batch.commit(noResult: true);
+    });
   }
 
   Future<void> installPlugin({
@@ -215,6 +234,13 @@ class PluginManager extends ChangeNotifier {
 
       _plugins.add(newPlugin);
       await _savePlugins();
+
+      // 创建插件的存储表
+      if (manifest.storage.isNotEmpty) {
+        await _storageManager.ensureTablesForPlugin(
+            manifest.id, manifest.storage);
+      }
+
       notifyListeners();
     } catch (_) {
       if (await tempDir.exists()) {
@@ -291,6 +317,9 @@ class PluginManager extends ChangeNotifier {
     if (await pluginDir.exists()) {
       await pluginDir.delete(recursive: true);
     }
+    // 清理插件的存储表
+    await _storageManager.dropTablesForPlugin(pluginId);
+
     _plugins.removeWhere((p) => p.id == pluginId);
     await _savePlugins();
     notifyListeners();

@@ -2,7 +2,7 @@
 
 ## RainCurtain 存储 API
 
-所有插件通过 `window.RainCurtain` API 进行数据操作。
+所有插件通过 `window.RainCurtain` API 进行数据操作。插件的存储表结构需在 `manifest.yml` 的 `storage` 字段中声明。
 
 ### 元数据
 
@@ -10,76 +10,134 @@
 RainCurtain.pluginId    // string - 插件 ID
 ```
 
-### 通用存储 API
+### 结构化存储 API
+
+插件通过 `RainCurtain.storage` 对 manifest 中声明的表执行 CRUD 操作。每个表自动包含 `_id` 自增主键。
 
 ```javascript
-await RainCurtain.storage.get(key)      // 读取数据（自动回退到 manifest 默认值）
-await RainCurtain.storage.set(key, val) // 保存数据
-await RainCurtain.storage.remove(key)   // 删除数据
-await RainCurtain.storage.clear()       // 清空所有数据
-await RainCurtain.storage.keys()        // 获取所有键
+// 插入（单行或多行）
+await RainCurtain.storage.insert(table, rows)
+// rows: { col: val } 或 [{ col: val }, ...]
+// 返回: { insertedCount: N }
+
+// 查询
+await RainCurtain.storage.query(table, options)
+// options: { where: { col: val }, orderBy: 'col DESC', limit: 10, offset: 0 }
+// 返回: [{ _id: 1, col: val, ... }, ...]
+
+// 更新
+await RainCurtain.storage.update(table, values, where)
+// values: { col: newVal }
+// where: { _id: 1 }  可选，为空则更新全部
+// 返回: { updatedCount: N }
+
+// 删除
+await RainCurtain.storage.delete(table, where)
+// where: { _id: 1 }  可选，为空则删除全部
+// 返回: { deletedCount: N }
+
+// 计数
+await RainCurtain.storage.count(table, where)
+// 返回: N
+
+// 清空表
+await RainCurtain.storage.clear(table)
 ```
 
-### `storage.get(key)` 值获取优先级
+### manifest.yml 中的表声明
 
-1. 溯流模式：变量池映射值 → 本地存储值 → manifest `default` 值 → `null`
-2. 雨幕模式：本地存储值 → manifest `default` 值 → `null`
+```yaml
+storage:
+  - name: "records"         # 表名（插件内唯一）
+    columns:
+      - name: "item"
+        type: "text"        # 支持: text, integer, real, boolean
+      - name: "amount"
+        type: "real"
+      - name: "created_at"
+        type: "text"
+```
 
-当 key 对应 manifest 中的某个 input 且设有 `default` 值时，本地存储为空也不会返回 `null`，而是返回默认值。
+支持的列类型：
+
+| 类型 | SQLite | JS 值 | 说明 |
+|------|--------|-------|------|
+| `text` | TEXT | string | 字符串 |
+| `integer` | INTEGER | number | 整数 |
+| `real` | REAL | number | 浮点数 |
+| `boolean` | INTEGER (0/1) | boolean | 布尔值，JS 侧自动转换 |
+
+### 溯流模式下的变量池拦截
+
+- **insert / update 时**：如果写入的列名匹配 `outputMappings` 中的 key，对应值会同步写入变量池
+- **query 时**：如果 where 条件的列名匹配 `inputMappings` 中的 key，会优先从变量池获取值
 
 ### 存储使用示例
 
 ```javascript
-// 保存任意 JSON 可序列化的值
-await RainCurtain.storage.set('preferences', {
-  theme: 'dark',
-  language: 'zh-CN',
+// 插入一条记录
+const result = await RainCurtain.storage.insert('records', {
+  item: '午饭',
+  amount: 18.5,
+  created_at: new Date().toISOString()
+});
+// result: { insertedCount: 1 }
+
+// 批量插入
+await RainCurtain.storage.insert('records', [
+  { item: '午饭', amount: 18 },
+  { item: '晚饭', amount: 25 }
+]);
+
+// 查询（带条件和排序）
+const rows = await RainCurtain.storage.query('records', {
+  where: { type: 'expense' },
+  orderBy: 'created_at DESC',
+  limit: 20
 });
 
-// 读取数据
-const prefs = await RainCurtain.storage.get('preferences');
-// 返回: { theme: 'dark', language: 'zh-CN' } 或 null
+// 按 _id 更新
+await RainCurtain.storage.update('records', { amount: 20 }, { _id: 1 });
 
-// 删除数据
-await RainCurtain.storage.remove('preferences');
+// 按条件删除
+await RainCurtain.storage.delete('records', { _id: 1 });
 
-// 清空所有数据
-await RainCurtain.storage.clear();
+// 计数
+const total = await RainCurtain.storage.count('records');
+const expenses = await RainCurtain.storage.count('records', { type: 'expense' });
 
-// 获取所有键
-const keys = await RainCurtain.storage.keys();
+// 清空表
+await RainCurtain.storage.clear('records');
 ```
-
-**存储特点：**
-
-- 自动持久化到宿主文件系统
-- 支持对象、数组、字符串、数字、布尔值
-- 按插件隔离存储
-- 宿主可配置数据流映射，插件无需感知
 
 ### 初始化模式
 
 ```javascript
 async function init() {
-  // 读取数据
-  const userId = await RainCurtain.storage.get('user_id');
-  if (userId) {
-    processData(userId);
+  // 查询已有数据
+  const records = await RainCurtain.storage.query('records', {
+    orderBy: 'created_at DESC',
+    limit: 50
+  });
+  
+  if (records.length > 0) {
+    renderRecords(records);
   }
-
-  // 恢复持久化状态
-  const savedState = await RainCurtain.storage.get('app_state');
-  if (savedState) {
-    restoreState(savedState);
-  }
-
-  // 保存数据
-  await RainCurtain.storage.set('app_state', currentState);
-
-  // 保存结果（若 key 匹配 manifest outputs 且有 outputMappings，自动同步到变量池）
-  await RainCurtain.storage.set('result', processedData);
+  
+  // 统计
+  const count = await RainCurtain.storage.count('records');
+  updateStats(count);
 }
 ```
+
+**存储特点：**
+
+- 每个插件独立的结构化表，按列存储
+- 支持 text / integer / real / boolean 四种列类型
+- boolean 列在 JS 层自动转换（true/false ↔ 0/1）
+- 每个表自动包含 `_id` 自增主键
+- 表结构由 manifest.yml 声明，安装时自动建表
+- 卸载插件时自动清理所有表
 
 ---
 

@@ -7,6 +7,136 @@ enum VersionComparisonResult {
   same,
 }
 
+/// 存储列定义
+class StorageColumnDefinition {
+  final String name;
+  final String type; // text, integer, real, boolean
+
+  static const List<String> supportedTypes = ['text', 'integer', 'real', 'boolean'];
+  static final RegExp _nameRegex = RegExp(r'^[a-zA-Z_][a-zA-Z0-9_]*$');
+
+  const StorageColumnDefinition({
+    required this.name,
+    required this.type,
+  });
+
+  void validate() {
+    if (name.trim().isEmpty) {
+      throw const FormatException('storage column name 不能为空');
+    }
+    if (!_nameRegex.hasMatch(name)) {
+      throw FormatException(
+          'storage column name "$name" 格式无效，必须以字母或下划线开头，后续为字母、数字、下划线');
+    }
+    if (name == '_id') {
+      throw const FormatException('storage column name 不能为 "_id"，该名称为系统保留主键');
+    }
+    if (!supportedTypes.contains(type)) {
+      throw FormatException(
+          'storage column type "$type" 无效，支持: ${supportedTypes.join(', ')}');
+    }
+  }
+
+  /// SQLite 列类型
+  String get sqliteType => switch (type) {
+    'text' => 'TEXT',
+    'integer' => 'INTEGER',
+    'real' => 'REAL',
+    'boolean' => 'INTEGER', // boolean 存为 0/1
+    _ => 'TEXT',
+  };
+
+  Map<String, dynamic> toJson() => {
+    'name': name,
+    'type': type,
+  };
+
+  factory StorageColumnDefinition.fromJson(Map<String, dynamic> json) {
+    return StorageColumnDefinition(
+      name: (json['name'] ?? '').toString(),
+      type: (json['type'] ?? '').toString(),
+    );
+  }
+
+  factory StorageColumnDefinition.fromYaml(dynamic yaml) {
+    if (yaml is! Map) {
+      throw const FormatException('storage column 定义必须是对象');
+    }
+    return StorageColumnDefinition.fromJson(Map<String, dynamic>.from(yaml));
+  }
+}
+
+/// 存储表定义
+class StorageTableDefinition {
+  final String name;
+  final List<StorageColumnDefinition> columns;
+
+  static final RegExp _nameRegex = RegExp(r'^[a-zA-Z_][a-zA-Z0-9_]*$');
+
+  const StorageTableDefinition({
+    required this.name,
+    required this.columns,
+  });
+
+  void validate() {
+    if (name.trim().isEmpty) {
+      throw const FormatException('storage table name 不能为空');
+    }
+    if (!_nameRegex.hasMatch(name)) {
+      throw FormatException(
+          'storage table name "$name" 格式无效，必须以字母或下划线开头，后续为字母、数字、下划线');
+    }
+    if (columns.isEmpty) {
+      throw FormatException('storage table "$name" 至少需要定义一个列');
+    }
+
+    final columnNames = <String>{};
+    for (final col in columns) {
+      col.validate();
+      if (columnNames.contains(col.name)) {
+        throw FormatException('storage table "$name" 中存在重复列名: ${col.name}');
+      }
+      columnNames.add(col.name);
+    }
+  }
+
+  Map<String, dynamic> toJson() => {
+    'name': name,
+    'columns': columns.map((c) => c.toJson()).toList(),
+  };
+
+  factory StorageTableDefinition.fromJson(Map<String, dynamic> json) {
+    final columnsList = json['columns'];
+    if (columnsList == null || columnsList is! List) {
+      throw const FormatException('storage table 缺少 columns 列表');
+    }
+    return StorageTableDefinition(
+      name: (json['name'] ?? '').toString(),
+      columns: columnsList
+          .map((c) => StorageColumnDefinition.fromJson(
+              Map<String, dynamic>.from(c as Map)))
+          .toList(),
+    );
+  }
+
+  factory StorageTableDefinition.fromYaml(dynamic yaml) {
+    if (yaml is! Map) {
+      throw const FormatException('storage table 定义必须是对象');
+    }
+    final map = Map<String, dynamic>.from(yaml);
+    final columnsList = map['columns'];
+    if (columnsList == null || columnsList is! List) {
+      throw const FormatException('storage table 缺少 columns 列表');
+    }
+    return StorageTableDefinition(
+      name: (map['name'] ?? '').toString(),
+      columns: columnsList
+          .map((c) => StorageColumnDefinition.fromYaml(c))
+          .toList(),
+    );
+  }
+}
+
 class PluginManifest {
   PluginManifest({
     required this.id,
@@ -17,6 +147,7 @@ class PluginManifest {
     this.icon = const DefaultIcon(),
     this.inputs = const [],
     this.outputs = const [],
+    this.storage = const [],
   });
 
   final String id;
@@ -27,6 +158,7 @@ class PluginManifest {
   final PluginIcon icon;
   final List<IODefinition> inputs;
   final List<IODefinition> outputs;
+  final List<StorageTableDefinition> storage;
 
   static final RegExp _semverRegex = RegExp(r'^\d+\.\d+\.\d+$');
   static final RegExp _uuidV7Regex = RegExp(
@@ -71,6 +203,16 @@ class PluginManifest {
       }
       outputNames.add(output.name);
     }
+
+    // 验证存储定义
+    final tableNames = <String>{};
+    for (final table in storage) {
+      table.validate();
+      if (tableNames.contains(table.name)) {
+        throw FormatException('Duplicate storage table name: ${table.name}');
+      }
+      tableNames.add(table.name);
+    }
   }
 
   Map<String, dynamic> toJson() => {
@@ -82,6 +224,7 @@ class PluginManifest {
     'icon': _iconToString(icon),
     'inputs': inputs.map((e) => e.toJson()).toList(),
     'outputs': outputs.map((e) => e.toJson()).toList(),
+    'storage': storage.map((e) => e.toJson()).toList(),
   };
 
   factory PluginManifest.fromJson(Map<String, dynamic> json) {
@@ -102,6 +245,19 @@ class PluginManifest {
       throw const FormatException('manifest.yml 的 outputs 必须是列表');
     }
 
+    // storage 是可选字段，默认空列表
+    final storageList = json['storage'];
+    List<StorageTableDefinition> storageDefs = [];
+    if (storageList != null) {
+      if (storageList is! List) {
+        throw const FormatException('manifest.yml 的 storage 必须是列表');
+      }
+      storageDefs = storageList
+          .map((e) => StorageTableDefinition.fromJson(
+              Map<String, dynamic>.from(e as Map)))
+          .toList();
+    }
+
     final manifest = PluginManifest(
       id: (json['id'] ?? '').toString(),
       name: (json['name'] ?? '').toString(),
@@ -119,6 +275,7 @@ class PluginManifest {
               Map<String, dynamic>.from(e as Map),
               isInput: false))
           .toList(),
+      storage: storageDefs,
     );
     manifest.validate();
     return manifest;
@@ -142,6 +299,18 @@ class PluginManifest {
       throw const FormatException('manifest.yml 的 outputs 必须是列表');
     }
 
+    // storage 是可选字段，默认空列表
+    final storageList = yaml['storage'];
+    List<StorageTableDefinition> storageDefs = [];
+    if (storageList != null) {
+      if (storageList is! List) {
+        throw const FormatException('manifest.yml 的 storage 必须是列表');
+      }
+      storageDefs = storageList
+          .map((e) => StorageTableDefinition.fromYaml(e))
+          .toList();
+    }
+
     final manifest = PluginManifest(
       id: (yaml['id'] ?? '').toString(),
       name: (yaml['name'] ?? '').toString(),
@@ -155,6 +324,7 @@ class PluginManifest {
       outputs: outputsList
           .map((e) => IODefinition.fromYaml(e, isInput: false))
           .toList(),
+      storage: storageDefs,
     );
     manifest.validate();
     return manifest;

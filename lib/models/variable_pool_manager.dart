@@ -1,8 +1,7 @@
 import 'dart:convert';
-import 'dart:io';
 import 'package:flutter/foundation.dart';
-import 'package:path/path.dart' as p;
-import 'package:path_provider/path_provider.dart';
+import 'package:sqflite_common_ffi/sqflite_ffi.dart';
+import 'database_manager.dart';
 import 'variable.dart';
 
 class VariablePoolManager extends ChangeNotifier {
@@ -12,7 +11,7 @@ class VariablePoolManager extends ChangeNotifier {
   final Set<String> _loadedPools = {};
   bool _isInit = false;
 
-  late Directory _rootDir;
+  late Database _db;
 
   bool get isInit => _isInit;
 
@@ -22,14 +21,10 @@ class VariablePoolManager extends ChangeNotifier {
 
   Future<void> _init() async {
     try {
-      final supportDir = await getApplicationSupportDirectory();
-      _rootDir = Directory(p.join(supportDir.path, 'RainCurtainPoolsData'));
-      await _rootDir.create(recursive: true);
-
+      _db = DatabaseManager.database;
       _isInit = true;
       notifyListeners();
-
-      debugPrint('VariablePoolManager initialized at: ${_rootDir.path}');
+      debugPrint('VariablePoolManager initialized (SQLite)');
     } catch (e, stackTrace) {
       debugPrint('VariablePoolManager init failed: $e');
       debugPrintStack(stackTrace: stackTrace);
@@ -37,50 +32,39 @@ class VariablePoolManager extends ChangeNotifier {
     }
   }
 
-  // ========== Path helpers ==========
-
-  Directory _getPoolDir(String poolId) {
-    return Directory(p.join(_rootDir.path, poolId));
-  }
-
-  File _getPluginDataFile(String poolId, String pluginId) {
-    return File(p.join(_rootDir.path, poolId, '$pluginId.json'));
-  }
-
   // ========== Loading ==========
 
   Future<void> _loadPoolVariables(String poolId) async {
     if (_loadedPools.contains(poolId)) return;
 
-    final poolDir = _getPoolDir(poolId);
     final Map<String, Variable> merged = {};
 
     try {
-      if (await poolDir.exists()) {
-        final entities = await poolDir.list().toList();
-        for (final entity in entities) {
-          if (entity is File && entity.path.endsWith('.json')) {
-            try {
-              final content = await entity.readAsString();
-              final jsonData = jsonDecode(content) as Map<String, dynamic>;
-              final data = jsonData['data'] as Map<String, dynamic>? ?? {};
+      final rows = await _db.query(
+        'pool_variables',
+        where: 'pool_id = ?',
+        whereArgs: [poolId],
+      );
 
-              for (final entry in data.entries) {
-                final variable = Variable.fromJson(
-                    Map<String, dynamic>.from(entry.value as Map));
-                // Last-write-wins: keep the variable with the latest updatedAt
-                if (!merged.containsKey(entry.key) ||
-                    variable.updatedAt
-                        .isAfter(merged[entry.key]!.updatedAt)) {
-                  merged[entry.key] = variable;
-                }
-              }
-            } catch (e) {
-              debugPrint(
-                  'Failed to load pool variable file ${entity.path}: $e');
-            }
+      for (final row in rows) {
+        final valueStr = row['value'] as String?;
+        dynamic value;
+        if (valueStr != null) {
+          try {
+            value = jsonDecode(valueStr);
+          } catch (_) {
+            value = valueStr;
           }
         }
+
+        final variable = Variable(
+          name: row['variable_name'] as String,
+          type: row['type'] as String,
+          value: value,
+          updatedAt: DateTime.parse(row['updated_at'] as String),
+          sourcePluginId: row['source_plugin_id'] as String?,
+        );
+        merged[variable.name] = variable;
       }
     } catch (e) {
       debugPrint('Failed to load pool variables for $poolId: $e');
@@ -92,69 +76,39 @@ class VariablePoolManager extends ChangeNotifier {
 
   // ========== Saving ==========
 
-  /// Save a single variable to its corresponding plugin data file.
-  Future<void> _saveVariableToFile(
-      String poolId, Variable variable) async {
-    final pluginId = variable.sourcePluginId ?? '_manual';
-    final file = _getPluginDataFile(poolId, pluginId);
-
+  /// Save a single variable to the database.
+  Future<void> _saveVariableToDb(String poolId, Variable variable) async {
     try {
-      final poolDir = _getPoolDir(poolId);
-      if (!await poolDir.exists()) {
-        await poolDir.create(recursive: true);
-      }
+      final valueEncoded =
+          variable.value != null ? jsonEncode(variable.value) : null;
 
-      // Load existing file data
-      Map<String, dynamic> data = {};
-      if (await file.exists()) {
-        try {
-          final content = await file.readAsString();
-          final jsonData = jsonDecode(content) as Map<String, dynamic>;
-          data = Map<String, dynamic>.from(jsonData['data'] as Map? ?? {});
-        } catch (e) {
-          debugPrint('Failed to read existing file, overwriting: $e');
-        }
-      }
-
-      // Update/add the variable
-      data[variable.name] = variable.toJson();
-
-      final jsonData = {
-        'data': data,
-        'lastUpdated': DateTime.now().toIso8601String(),
-      };
-      await file.writeAsString(jsonEncode(jsonData), flush: true);
+      await _db.insert(
+        'pool_variables',
+        {
+          'pool_id': poolId,
+          'variable_name': variable.name,
+          'type': variable.type,
+          'value': valueEncoded,
+          'source_plugin_id': variable.sourcePluginId,
+          'updated_at': variable.updatedAt.toIso8601String(),
+        },
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
     } catch (e) {
       debugPrint(
           'Failed to save variable ${variable.name} for pool $poolId: $e');
     }
   }
 
-  /// Remove a variable from its plugin data file.
-  Future<void> _removeVariableFromFile(
-      String poolId, String variableName, String? sourcePluginId) async {
-    final pluginId = sourcePluginId ?? '_manual';
-    final file = _getPluginDataFile(poolId, pluginId);
-
+  /// Remove a variable from the database.
+  Future<void> _removeVariableFromDb(
+      String poolId, String variableName) async {
     try {
-      if (!await file.exists()) return;
-
-      final content = await file.readAsString();
-      final jsonData = jsonDecode(content) as Map<String, dynamic>;
-      final data =
-          Map<String, dynamic>.from(jsonData['data'] as Map? ?? {});
-
-      data.remove(variableName);
-
-      if (data.isEmpty) {
-        await file.delete();
-      } else {
-        final updated = {
-          'data': data,
-          'lastUpdated': DateTime.now().toIso8601String(),
-        };
-        await file.writeAsString(jsonEncode(updated), flush: true);
-      }
+      await _db.delete(
+        'pool_variables',
+        where: 'pool_id = ? AND variable_name = ?',
+        whereArgs: [poolId, variableName],
+      );
     } catch (e) {
       debugPrint(
           'Failed to remove variable $variableName from pool $poolId: $e');
@@ -193,7 +147,7 @@ class VariablePoolManager extends ChangeNotifier {
     _pools[poolId] ??= {};
     _pools[poolId]![variableName] = variable;
 
-    await _saveVariableToFile(poolId, variable);
+    await _saveVariableToDb(poolId, variable);
     notifyListeners();
   }
 
@@ -202,8 +156,7 @@ class VariablePoolManager extends ChangeNotifier {
     final variable = _pools[poolId]?[variableName];
     if (variable != null) {
       _pools[poolId]?.remove(variableName);
-      await _removeVariableFromFile(
-          poolId, variableName, variable.sourcePluginId);
+      await _removeVariableFromDb(poolId, variableName);
       notifyListeners();
     }
   }
@@ -213,12 +166,13 @@ class VariablePoolManager extends ChangeNotifier {
     _loadedPools.remove(poolId);
 
     try {
-      final poolDir = _getPoolDir(poolId);
-      if (await poolDir.exists()) {
-        await poolDir.delete(recursive: true);
-      }
+      await _db.delete(
+        'pool_variables',
+        where: 'pool_id = ?',
+        whereArgs: [poolId],
+      );
     } catch (e) {
-      debugPrint('Failed to clear pool directory for $poolId: $e');
+      debugPrint('Failed to clear pool data for $poolId: $e');
     }
 
     notifyListeners();
@@ -229,17 +183,19 @@ class VariablePoolManager extends ChangeNotifier {
     await _loadPoolVariables(poolId);
 
     // Remove from in-memory cache
-    _pools[poolId]?.removeWhere((_, v) => (v.sourcePluginId ?? '_manual') == pluginId);
+    _pools[poolId]
+        ?.removeWhere((_, v) => (v.sourcePluginId ?? '_manual') == pluginId);
 
-    // Delete the plugin data file
+    // Delete from database
     try {
-      final file = _getPluginDataFile(poolId, pluginId);
-      if (await file.exists()) {
-        await file.delete();
-      }
+      await _db.delete(
+        'pool_variables',
+        where: 'pool_id = ? AND source_plugin_id = ?',
+        whereArgs: [poolId, pluginId],
+      );
     } catch (e) {
       debugPrint(
-          'Failed to delete plugin data file for $pluginId in pool $poolId: $e');
+          'Failed to delete plugin data for $pluginId in pool $poolId: $e');
     }
 
     notifyListeners();

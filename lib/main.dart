@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'theme/theme_provider.dart';
+import 'models/database_manager.dart';
 import 'models/plugin_manager.dart';
 import 'models/plugin_data_manager.dart';
 import 'models/tab_manager.dart';
@@ -12,6 +13,7 @@ import 'models/pool_manager.dart';
 import 'models/variable_pool_manager.dart';
 import 'screens/home_page.dart';
 import 'widgets/rain_background.dart';
+import 'utils/material_icons_registry.dart';
 
 import 'sandbox_server.dart';
 
@@ -23,6 +25,15 @@ int sandboxServerPort = 0;
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // 初始化 SQLite 数据库（必须在各 Manager 之前完成）
+  await DatabaseManager.instance.init();
+
+  // 预加载 Material Icons codepoints 表（异步且不阻塞 runApp，
+  // 但通常会在第一帧渲染前完成；未完成时插件图标会先以缩写兜底，
+  // 加载完成后下一次重建即可显示真实图标）
+  // 这里 await 是为了大多数情况下首帧就能显示真实图标。
+  await MaterialIconsRegistry.instance.ensureInitialized();
 
   // 如果底层在 Android 上，可能要等待引擎初始化
   if (Platform.isAndroid) {
