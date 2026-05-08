@@ -1,8 +1,8 @@
 # API 参考
 
-## RainCurtain 存储 API
+## RainCurtain API
 
-所有插件通过 `window.RainCurtain` API 进行数据操作。插件的存储表结构需在 `manifest.yml` 的 `storage` 字段中声明。
+所有插件通过 `window.RainCurtain` API 进行数据操作和输入获取。
 
 ### 元数据
 
@@ -10,7 +10,20 @@
 RainCurtain.pluginId    // string - 插件 ID
 ```
 
+### 输入获取
+
+```javascript
+const value = await RainCurtain.getInput(name)
+// name: manifest.yml 中 inputs 定义的名称
+// 返回: 输入值（溯流模式从变量池读取，雨幕模式返回 manifest default）
+//       未找到时返回 null
+```
+
+溯流模式下，如果该 input 在 `inputMappings` 中配置了变量池映射，优先返回变量池中的值；若变量池中无值，回退到 manifest 中定义的 `default` 值。雨幕模式（非溯流）下直接返回 `default` 值。
+
 ### 结构化存储 API
+
+插件的存储表结构需在 `manifest.yml` 的 `storage` 字段中声明。
 
 插件通过 `RainCurtain.storage` 对 manifest 中声明的表执行 CRUD 操作。每个表自动包含 `_id` 自增主键。
 
@@ -70,7 +83,7 @@ storage:
 ### 溯流模式下的变量池拦截
 
 - **insert / update 时**：如果写入的列名匹配 `outputMappings` 中的 key，对应值会同步写入变量池
-- **query 时**：如果 where 条件的列名匹配 `inputMappings` 中的 key，会优先从变量池获取值
+- **query / delete / count 时**：如果 where 条件的列名匹配 `inputMappings` 中的 key，会优先从变量池获取值
 
 ### 存储使用示例
 
@@ -138,6 +151,18 @@ async function init() {
 - 每个表自动包含 `_id` 自增主键
 - 表结构由 manifest.yml 声明，安装时自动建表
 - 卸载插件时自动清理所有表
+
+### 表结构变更行为
+
+插件更新版本时，如果 `storage` 中的表结构发生变化，系统会尝试兼容迁移以保留用户数据：
+
+| 变更类型 | 处理方式 | 用户数据 |
+|---|---|---|
+| **新增列** | 自动 `ALTER TABLE ADD COLUMN` | 已有数据保留，新列值为 `null` |
+| **删除列** | 不做处理，旧列保留在表中 | 已有数据保留，旧列对 API 不可见 |
+| **修改列类型** | 删除并重建整个表 | **数据丢失** |
+
+简单来说：只要不改变已有列的类型，用户数据就不会丢失。如果需要变更列类型，应当通知用户数据会被清除。
 
 ---
 

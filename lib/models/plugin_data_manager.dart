@@ -20,7 +20,8 @@ class PluginDataStats {
 /// 插件数据管理器
 /// 管理插件的结构化存储数据
 class PluginDataManager extends ChangeNotifier {
-  late PluginStorageManager pluginStorageManager;
+  /// 通过单例访问 PluginStorageManager
+  PluginStorageManager get pluginStorageManager => PluginStorageManager.instance;
 
   /// 数据库文件所在目录路径（用于 UI 显示）
   String get dataDir => DatabaseManager.instance.dbDirectoryPath;
@@ -34,9 +35,7 @@ class PluginDataManager extends ChangeNotifier {
 
   Future<void> _init() async {
     try {
-      final db = DatabaseManager.database;
-      pluginStorageManager = PluginStorageManager(database: db);
-
+      // PluginStorageManager 已由 DatabaseManager.init() 初始化为单例
       _isInit = true;
       notifyListeners();
 

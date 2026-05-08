@@ -53,6 +53,9 @@ manifest.yml 的完整格式、字段定义和示例参见 `references/manifest.
 ## 关键 API 速查
 
 ```javascript
+// 获取输入值（溯流模式从变量池读取，雨幕模式返回 manifest default）
+const value = await RainCurtain.getInput('input_name')
+
 // 结构化存储（需在 manifest.yml 中声明 storage 表结构）
 await RainCurtain.storage.insert('table', { col: val })       // 插入
 await RainCurtain.storage.query('table', { where, orderBy, limit, offset })  // 查询

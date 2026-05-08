@@ -6,6 +6,8 @@ import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
+import 'plugin_storage_manager.dart';
+
 /// 数据库管理器
 /// 单例模式管理 SQLite 数据库实例，负责建表、版本迁移、旧数据迁移
 class DatabaseManager {
@@ -55,13 +57,16 @@ class DatabaseManager {
     _database = await databaseFactory.openDatabase(
       dbPath,
       options: OpenDatabaseOptions(
-        version: 2,
+        version: 3,
         onCreate: _onCreate,
         onUpgrade: _onUpgrade,
       ),
     );
 
     debugPrint('DatabaseManager initialized at: $dbPath');
+
+    // 初始化 PluginStorageManager 单例
+    PluginStorageManager.init(_database!);
 
     // 执行旧数据迁移
     await _migrateOldData(supportDir);
@@ -91,7 +96,8 @@ class DatabaseManager {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         plugin_id TEXT NOT NULL UNIQUE,
         entry_path TEXT NOT NULL,
-        manifest_json TEXT NOT NULL
+        manifest_json TEXT NOT NULL,
+        sort_order INTEGER NOT NULL DEFAULT 0
       )
     ''');
 
@@ -107,6 +113,15 @@ class DatabaseManager {
       // 旧数据无法自动映射到新的结构化表（schema 完全不同）
       await db.execute('DROP TABLE IF EXISTS local_storage');
       debugPrint('Dropped legacy local_storage table');
+    }
+
+    if (oldVersion < 3) {
+      // v2 → v3：plugins 表添加 sort_order 列，用于手动排序
+      await db.execute(
+          'ALTER TABLE plugins ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0');
+      // 根据现有主键 id 赋初始排序值，保持原始插入顺序
+      await db.execute('UPDATE plugins SET sort_order = id');
+      debugPrint('Added sort_order column to plugins table');
     }
   }
 

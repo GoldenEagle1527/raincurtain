@@ -5,13 +5,30 @@ import 'plugin_manifest.dart';
 
 /// 插件存储管理器
 /// 负责管理每个插件的独立结构化表（替代旧的 LocalStorageManager）
+/// 全局单例，由 DatabaseManager.init() 初始化
 class PluginStorageManager {
+  static PluginStorageManager? _instance;
+
+  /// 获取已初始化的单例实例
+  static PluginStorageManager get instance {
+    if (_instance == null) {
+      throw StateError('PluginStorageManager has not been initialized. '
+          'Ensure DatabaseManager.init() has been called first.');
+    }
+    return _instance!;
+  }
+
+  /// 初始化单例（由 DatabaseManager.init() 调用）
+  static void init(Database db) {
+    _instance ??= PluginStorageManager._internal(db);
+  }
+
   final Database _db;
 
   /// 插件表 schema 缓存：pluginId → List<StorageTableDefinition>
   final Map<String, List<StorageTableDefinition>> _schemaCache = {};
 
-  PluginStorageManager({required Database database}) : _db = database;
+  PluginStorageManager._internal(this._db);
 
   // ─── 表名辅助 ──────────────────────────────────────────────
 
@@ -65,7 +82,10 @@ class PluginStorageManager {
 
   /// 确保插件的所有存储表存在（幂等，可在每次插件加载时调用）
   ///
-  /// 如果表已存在但列不匹配（schema 变更），会 drop 并重建。
+  /// Schema 变更策略（尽可能保留已有数据）：
+  /// - 新增列 → ALTER TABLE ADD COLUMN（旧数据保留，新列为 NULL）
+  /// - 删除列 → 不做处理（旧列留在表中，但 CRUD 时自动忽略）
+  /// - 列类型变更 → DROP 并重建（不可兼容的冲突）
   Future<void> ensureTablesForPlugin(
       String pluginId, List<StorageTableDefinition> tables) async {
     _schemaCache[pluginId] = tables;
@@ -80,31 +100,74 @@ class PluginStorageManager {
       );
 
       if (existing.isNotEmpty) {
-        // 表已存在，检查列是否匹配
+        // 表已存在，获取现有列信息（名称 → SQLite 类型）
         final columnsInfo = await _db.rawQuery('PRAGMA table_info($fullName)');
-        final existingColumns = <String>{};
+        final existingColumns = <String, String>{}; // name → type (大写)
         for (final col in columnsInfo) {
           final colName = col['name'] as String;
           if (colName != '_id') {
-            existingColumns.add(colName);
+            existingColumns[colName] =
+                (col['type'] as String).toUpperCase();
           }
         }
 
-        final expectedColumns = table.columns.map((c) => c.name).toSet();
+        final expectedColumns = {
+          for (final c in table.columns) c.name: c.sqliteType,
+        };
 
-        if (!setEquals(existingColumns, expectedColumns)) {
-          // 列不匹配，drop 并重建
+        // 如果完全一致，跳过
+        if (_columnsMatch(existingColumns, expectedColumns)) {
+          continue;
+        }
+
+        // 检查是否存在不可兼容的类型变更
+        bool hasTypeConflict = false;
+        for (final entry in expectedColumns.entries) {
+          final existingType = existingColumns[entry.key];
+          if (existingType != null && existingType != entry.value) {
+            debugPrint(
+                'Type conflict for $fullName.${entry.key}: '
+                'existing=$existingType, expected=${entry.value}');
+            hasTypeConflict = true;
+            break;
+          }
+        }
+
+        if (hasTypeConflict) {
+          // 存在类型冲突，必须 DROP 重建
           debugPrint(
-              'Schema mismatch for $fullName, dropping and recreating. '
-              'Existing: $existingColumns, Expected: $expectedColumns');
+              'Incompatible schema change for $fullName, '
+              'dropping and recreating (type conflict)');
           await _db.execute('DROP TABLE IF EXISTS $fullName');
         } else {
-          // 列匹配，跳过
-          continue;
+          // 无类型冲突，尝试增量迁移：ADD COLUMN 补齐新列
+          final columnsToAdd = expectedColumns.keys
+              .where((name) => !existingColumns.containsKey(name))
+              .toList();
+
+          for (final colName in columnsToAdd) {
+            final colType = expectedColumns[colName]!;
+            await _db.execute(
+                'ALTER TABLE $fullName ADD COLUMN $colName $colType');
+            debugPrint('Added column $colName ($colType) to $fullName');
+          }
+
+          // 旧表中多出的列（已删除的列）不做处理，保留在表中
+          // schema 缓存中不包含这些列，CRUD 操作会自动忽略它们
+          final droppedColumns = existingColumns.keys
+              .where((name) => !expectedColumns.containsKey(name))
+              .toSet();
+          if (droppedColumns.isNotEmpty) {
+            debugPrint(
+                'Columns no longer in schema for $fullName: '
+                '$droppedColumns (kept in table, ignored by CRUD)');
+          }
+
+          continue; // 增量迁移完成，不需要重建
         }
       }
 
-      // 创建表
+      // 创建表（首次或 DROP 后重建）
       final columnDefs = table.columns
           .map((c) => '${c.name} ${c.sqliteType}')
           .join(', ');
@@ -116,6 +179,21 @@ class PluginStorageManager {
       ''');
       debugPrint('Created storage table: $fullName');
     }
+  }
+
+  /// 检查现有表结构是否已满足期望 schema（无需任何迁移操作）
+  ///
+  /// 返回 true 的条件：期望的每一列都已存在于表中且类型相同。
+  /// 现有表中多出的列（已从 schema 中移除）不影响判定。
+  bool _columnsMatch(
+      Map<String, String> existing, Map<String, String> expected) {
+    for (final entry in expected.entries) {
+      final existingType = existing[entry.key];
+      if (existingType == null || existingType != entry.value) {
+        return false;
+      }
+    }
+    return true;
   }
 
   /// 删除插件的所有存储表（卸载时使用）
@@ -224,6 +302,8 @@ class PluginStorageManager {
     );
     if (tableExists.isEmpty) return [];
 
+    final _safeNameRegex = RegExp(r'^[a-zA-Z_][a-zA-Z0-9_]*$');
+
     String sql = 'SELECT * FROM $fullName';
     List<Object?>? args;
 
@@ -231,14 +311,41 @@ class PluginStorageManager {
       final clauses = <String>[];
       args = <Object?>[];
       for (final entry in where.entries) {
+        if (!_safeNameRegex.hasMatch(entry.key)) {
+          debugPrint('Invalid key in loose-mode where: ${entry.key}, skipping');
+          continue;
+        }
         clauses.add('${entry.key} = ?');
         args.add(entry.value);
       }
-      sql += ' WHERE ${clauses.join(' AND ')}';
+      if (clauses.isNotEmpty) {
+        sql += ' WHERE ${clauses.join(' AND ')}';
+      }
     }
 
     if (orderBy != null && orderBy.isNotEmpty) {
-      sql += ' ORDER BY $orderBy';
+      final orderParts = orderBy.split(',');
+      final sanitizedOrder = <String>[];
+      for (final part in orderParts) {
+        final trimmed = part.trim();
+        if (trimmed.isEmpty) continue;
+        final tokens = trimmed.split(RegExp(r'\s+'));
+        final colName = tokens[0];
+        final direction =
+            tokens.length > 1 ? tokens[1].toUpperCase() : 'ASC';
+        if (!_safeNameRegex.hasMatch(colName)) {
+          debugPrint('Invalid column in loose-mode orderBy: $colName, skipping');
+          continue;
+        }
+        if (direction != 'ASC' && direction != 'DESC') {
+          sanitizedOrder.add('$colName ASC');
+        } else {
+          sanitizedOrder.add('$colName $direction');
+        }
+      }
+      if (sanitizedOrder.isNotEmpty) {
+        sql += ' ORDER BY ${sanitizedOrder.join(', ')}';
+      }
     }
     if (limit != null) {
       sql += ' LIMIT $limit';

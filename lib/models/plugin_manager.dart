@@ -6,7 +6,6 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
-import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:uuid/uuid.dart';
 import 'package:yaml/yaml.dart';
 
@@ -64,8 +63,6 @@ class PluginManager extends ChangeNotifier {
 
   late Directory sandboxDir;
   final Uuid _uuid = const Uuid();
-  late Database _db;
-  late PluginStorageManager _storageManager;
 
   PluginManager() {
     _init();
@@ -73,9 +70,6 @@ class PluginManager extends ChangeNotifier {
 
   Future<void> _init() async {
     try {
-      _db = DatabaseManager.database;
-      _storageManager = PluginStorageManager(database: _db);
-
       final supportDir = await getApplicationSupportDirectory();
       sandboxDir = Directory(p.join(supportDir.path, 'RainCurtainPlugins'));
       if (!await sandboxDir.exists()) {
@@ -101,7 +95,8 @@ class PluginManager extends ChangeNotifier {
   }
 
   Future<void> _loadPlugins() async {
-    final rows = await _db.query('plugins');
+    final db = DatabaseManager.database;
+    final rows = await db.query('plugins', orderBy: 'sort_order ASC');
     final List<LocalPlugin> loaded = [];
 
     for (final row in rows) {
@@ -123,7 +118,7 @@ class PluginManager extends ChangeNotifier {
 
         // 确保插件的存储表存在
         if (manifest.storage.isNotEmpty) {
-          await _storageManager.ensureTablesForPlugin(
+          await PluginStorageManager.instance.ensureTablesForPlugin(
               manifest.id, manifest.storage);
         }
       } catch (err) {
@@ -135,15 +130,18 @@ class PluginManager extends ChangeNotifier {
   }
 
   Future<void> _savePlugins() async {
-    await _db.transaction((txn) async {
+    final db = DatabaseManager.database;
+    await db.transaction((txn) async {
       // 清空后重新插入
       await txn.delete('plugins');
       final batch = txn.batch();
-      for (final plugin in _plugins) {
+      for (int i = 0; i < _plugins.length; i++) {
+        final plugin = _plugins[i];
         batch.insert('plugins', {
           'plugin_id': plugin.id,
           'entry_path': plugin.entryPath,
           'manifest_json': jsonEncode(plugin.manifest.toJson()),
+          'sort_order': i,
         });
       }
       await batch.commit(noResult: true);
@@ -237,7 +235,7 @@ class PluginManager extends ChangeNotifier {
 
       // 创建插件的存储表
       if (manifest.storage.isNotEmpty) {
-        await _storageManager.ensureTablesForPlugin(
+        await PluginStorageManager.instance.ensureTablesForPlugin(
             manifest.id, manifest.storage);
       }
 
@@ -312,13 +310,27 @@ class PluginManager extends ChangeNotifier {
     }
   }
 
+  /// 拖拽排序插件列表
+  /// [oldIndex] 和 [newIndex] 来自 ReorderableListView.onReorder
+  Future<void> reorderPlugins(int oldIndex, int newIndex) async {
+    if (oldIndex < newIndex) {
+      newIndex -= 1; // ReorderableListView 的标准偏移处理
+    }
+    if (oldIndex < 0 || oldIndex >= _plugins.length ||
+        newIndex < 0 || newIndex >= _plugins.length) return;
+    final item = _plugins.removeAt(oldIndex);
+    _plugins.insert(newIndex, item);
+    await _savePlugins();
+    notifyListeners();
+  }
+
   Future<void> uninstallPlugin(String pluginId) async {
     final pluginDir = Directory(p.join(sandboxDir.path, pluginId));
     if (await pluginDir.exists()) {
       await pluginDir.delete(recursive: true);
     }
     // 清理插件的存储表
-    await _storageManager.dropTablesForPlugin(pluginId);
+    await PluginStorageManager.instance.dropTablesForPlugin(pluginId);
 
     _plugins.removeWhere((p) => p.id == pluginId);
     await _savePlugins();

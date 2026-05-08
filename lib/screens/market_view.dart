@@ -90,13 +90,30 @@ class MarketView extends StatelessWidget {
     final colorScheme = Theme.of(context).colorScheme;
     final spacing = ResponsiveHelper.getListItemSpacing(context);
     
-    return ListView.separated(
+    return ReorderableListView.builder(
+      buildDefaultDragHandles: false,
       padding: const EdgeInsets.only(bottom: 16),
       itemCount: plugins.length,
-      separatorBuilder: (context, index) => SizedBox(height: spacing),
+      onReorder: (oldIndex, newIndex) {
+        pluginManager.reorderPlugins(oldIndex, newIndex);
+      },
+      proxyDecorator: (child, index, animation) => Material(
+        elevation: 4,
+        color: Colors.transparent,
+        shadowColor: colorScheme.shadow,
+        borderRadius: BorderRadius.circular(12),
+        child: child,
+      ),
       itemBuilder: (context, index) {
         final plugin = plugins[index];
-        return _buildPluginCard(context, plugin, pluginManager, colorScheme);
+        return ReorderableDelayedDragStartListener(
+          key: ValueKey(plugin.id),
+          index: index,
+          child: Padding(
+            padding: EdgeInsets.only(bottom: index < plugins.length - 1 ? spacing : 0),
+            child: _buildPluginCard(context, plugin, pluginManager, colorScheme),
+          ),
+        );
       },
     );
   }

@@ -1307,6 +1307,16 @@ class PluginWebViewState extends State<PluginWebView>
     // ========== 元数据 ==========
     pluginId: '$pluginId',
     
+    // ========== 输入获取 ==========
+    getInput: async function(name) {
+      try {
+        return await _call('rc_get_input', name);
+      } catch (e) {
+        console.error('RainCurtain.getInput error:', e);
+        return null;
+      }
+    },
+    
     // ========== 结构化存储 API ==========
     storage: {
       insert: async function(table, rows) {
@@ -1493,6 +1503,43 @@ class PluginWebViewState extends State<PluginWebView>
               },
             );
             
+    // ========== 输入获取 API Handler ==========
+
+    // 获取输入值：溯流模式从变量池读取，雨幕模式返回 manifest default
+    controller.addJavaScriptHandler(
+      handlerName: 'rc_get_input',
+      callback: (args) async {
+        if (args.isEmpty) return null;
+
+        final inputName = args[0] as String?;
+        if (inputName == null || inputName.isEmpty) return null;
+
+        // 查找 manifest 中对应的 input 定义
+        final inputs = widget.plugin.manifest.inputs;
+        final inputDef = inputs
+            .where((i) => i.name == inputName)
+            .firstOrNull;
+
+        // 溯流模式：尝试从变量池获取映射的值
+        if (widget.poolId != null && widget.poolPluginId != null && context.mounted) {
+          final poolManager = context.read<PoolManager>();
+          final pp = poolManager.getPoolPluginById(widget.poolId!, widget.poolPluginId!);
+          if (pp != null) {
+            final variableName = pp.inputMappings[inputName];
+            if (variableName != null) {
+              final variablePoolManager = context.read<VariablePoolManager>();
+              final value = await variablePoolManager.getVariable(
+                  widget.poolId!, variableName);
+              if (value != null) return value;
+            }
+          }
+        }
+
+        // 回退到 manifest default
+        return inputDef?.defaultValue;
+      },
+    );
+
     // ========== 结构化存储 API Handlers ==========
 
     // 插入数据 (带输出拦截：溯流模式下匹配 outputMappings 写变量池)
@@ -1658,7 +1705,7 @@ class PluginWebViewState extends State<PluginWebView>
       },
     );
 
-    // 删除数据
+    // 删除数据 (带输入拦截：溯流模式下变量池优先)
     controller.addJavaScriptHandler(
       handlerName: 'rc_storage_delete',
       callback: (args) async {
@@ -1670,6 +1717,24 @@ class PluginWebViewState extends State<PluginWebView>
             ? Map<String, dynamic>.from(data['where'] as Map)
             : null;
         if (table == null) return {'deletedCount': 0};
+        
+        // 溯流模式输入拦截：检查 where 中的 key 是否匹配 inputMappings
+        if (widget.poolId != null && widget.poolPluginId != null && context.mounted) {
+          final poolManager = context.read<PoolManager>();
+          final pp = poolManager.getPoolPluginById(widget.poolId!, widget.poolPluginId!);
+          if (pp != null && where != null) {
+            for (final key in where.keys.toList()) {
+              final variableName = pp.inputMappings[key];
+              if (variableName != null) {
+                final variablePoolManager = context.read<VariablePoolManager>();
+                final value = await variablePoolManager.getVariable(widget.poolId!, variableName);
+                if (value != null) {
+                  where[key] = value;
+                }
+              }
+            }
+          }
+        }
         
         if (!context.mounted) return {'deletedCount': 0};
         final dataManager = context.read<PluginDataManager>();
@@ -1686,7 +1751,7 @@ class PluginWebViewState extends State<PluginWebView>
       },
     );
 
-    // 计数
+    // 计数 (带输入拦截：溯流模式下变量池优先)
     controller.addJavaScriptHandler(
       handlerName: 'rc_storage_count',
       callback: (args) async {
@@ -1698,6 +1763,24 @@ class PluginWebViewState extends State<PluginWebView>
             ? Map<String, dynamic>.from(data['where'] as Map)
             : null;
         if (table == null) return 0;
+        
+        // 溯流模式输入拦截：检查 where 中的 key 是否匹配 inputMappings
+        if (widget.poolId != null && widget.poolPluginId != null && context.mounted) {
+          final poolManager = context.read<PoolManager>();
+          final pp = poolManager.getPoolPluginById(widget.poolId!, widget.poolPluginId!);
+          if (pp != null && where != null) {
+            for (final key in where.keys.toList()) {
+              final variableName = pp.inputMappings[key];
+              if (variableName != null) {
+                final variablePoolManager = context.read<VariablePoolManager>();
+                final value = await variablePoolManager.getVariable(widget.poolId!, variableName);
+                if (value != null) {
+                  where[key] = value;
+                }
+              }
+            }
+          }
+        }
         
         if (!context.mounted) return 0;
         final dataManager = context.read<PluginDataManager>();
@@ -1781,6 +1864,7 @@ class PluginWebViewState extends State<PluginWebView>
                 final client = http.Client();
                 _activeRequests[requestId] = client;
 
+                bool isStreaming = false;
                 try {
                   // --- 检查 GET 请求缓存 ---
                   if (method == 'GET') {
@@ -1904,9 +1988,9 @@ class PluginWebViewState extends State<PluginWebView>
                       },
                       onError: (error) {
                         if (mounted && webViewController != null) {
-                          final safeError = error.toString().replaceAll('"', '\\"').replaceAll('\n', '\\n');
+                          final safeError = jsonEncode(error.toString());
                           webViewController?.evaluateJavascript(
-                              source: 'if(window["__rc_stream_error_$requestId"]) window["__rc_stream_error_$requestId"]("$safeError");');
+                              source: 'if(window["__rc_stream_error_$requestId"]) window["__rc_stream_error_$requestId"]($safeError);');
                         }
                         metrics.fail(error.toString());
                         metrics.log();
@@ -1917,6 +2001,7 @@ class PluginWebViewState extends State<PluginWebView>
                       cancelOnError: true,
                     );
 
+                    isStreaming = true;
                     return result;
                   }
 
@@ -1959,8 +2044,10 @@ class PluginWebViewState extends State<PluginWebView>
                     'error': e.toString(),
                   };
                 } finally {
-                  _activeRequests.remove(requestId);
-                  client.close();
+                  if (!isStreaming) {
+                    _activeRequests.remove(requestId);
+                    client.close();
+                  }
                 }
               },
             );
