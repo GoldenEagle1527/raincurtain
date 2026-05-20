@@ -43,7 +43,7 @@ storage:                    # 可选：声明插件的存储表结构
 | `type` | 数据类型：`string`, `number`, `boolean`, `object`, `array` |
 | `description` | 接口说明，用于 UI 显示 |
 | `required` | 是否必需（仅 inputs 有效），默认 false |
-| `default` | 默认值（仅 inputs 有效，且必须提供）。当本地存储和变量池均无值时，`storage.get(key)` 自动回退到此默认值 |
+| `default` | 默认值（仅 inputs 有效，且必须提供）。`getInput(name)` 在无外部提供值时返回此默认值 |
 | `schema` | 结构定义（仅 `object` 类型必需）。基础 JSON Schema 子集，支持 `properties`（属性名 → `{type, description}`）和 `required`（必需属性列表） |
 | `items` | 元素类型定义（仅 `array` 类型必需）。包含 `type` 字段，若元素为 `object` 则递归定义 `properties`/`required`，若元素为 `array` 则递归定义 `items` |
 

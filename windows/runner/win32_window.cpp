@@ -193,13 +193,6 @@ Win32Window::MessageHandler(HWND hwnd,
       }
       return 0;
 
-    case WM_SYSCOMMAND:
-      if (wparam == SC_MINIMIZE) {
-        Hide();
-        return 0;
-      }
-      break;
-
     case WM_DPICHANGED: {
       auto newRectSize = reinterpret_cast<RECT*>(lparam);
       LONG newWidth = newRectSize->right - newRectSize->left;

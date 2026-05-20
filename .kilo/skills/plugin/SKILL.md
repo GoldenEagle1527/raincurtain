@@ -53,8 +53,11 @@ manifest.yml 的完整格式、字段定义和示例参见 `references/manifest.
 ## 关键 API 速查
 
 ```javascript
-// 获取输入值（溯流模式从变量池读取，雨幕模式返回 manifest default）
+// 获取输入值
 const value = await RainCurtain.getInput('input_name')
+
+// 设置输出值
+await RainCurtain.setOutput('output_name', value)
 
 // 结构化存储（需在 manifest.yml 中声明 storage 表结构）
 await RainCurtain.storage.insert('table', { col: val })       // 插入
@@ -73,7 +76,51 @@ const resp = await fetch(url, { headers: { 'Accept': 'text/event-stream' } })
 // 宿主通信
 new Notification("标题", { body: "内容" })
 await navigator.clipboard.writeText("文本")
+
+// 文件系统访问（已透明代理，两个平台行为一致）
+// 保存文件
+const handle = await window.showSaveFilePicker({ suggestedName: 'data.json' })
+const writable = await handle.createWritable()
+await writable.write(JSON.stringify(data))
+await writable.close()
+
+// 打开文件
+const [fileHandle] = await window.showOpenFilePicker()
+const file = await fileHandle.getFile()
+const text = await file.text()
+
+// 选择目录并遍历
+const dirHandle = await window.showDirectoryPicker()
+for await (const [name, entry] of dirHandle.entries()) { /* ... */ }
 ```
+
+## 输入/输出处理
+
+`window.RainCurtain` 由宿主在页面加载前注入，所有插件环境下始终可用。
+
+### 获取输入
+
+```javascript
+const videoFile = await RainCurtain.getInput('video_file');
+if (videoFile) {
+  await loadVideo(videoFile);
+} else {
+  showFilePicker(); // 无输入时提供手动入口
+}
+```
+
+- `getInput(name)` 返回 manifest inputs 中对应名称的当前值
+- 值可能来自外部动态提供，也可能是 manifest 中的 default
+- 返回 null 或空值时，插件应提供用户手动输入的 UI 入口
+
+### 设置输出
+
+```javascript
+await RainCurtain.setOutput('output_file', filePath);
+```
+
+- 在插件产出结果时调用，宿主自动处理持久化和传递
+- name 对应 manifest.yml 中 outputs 声明的名称
 
 ## 代码架构建议
 
@@ -107,3 +154,4 @@ await navigator.clipboard.writeText("文本")
 - [ ] 成功接入了系统 MD3 CSS 主题变量。
 - [ ] `manifest.yml` 配置完整（包含输入输出及默认值，版本号格式正确）。
 - [ ] 确保在桌面和移动端（触摸与鼠标）均有良好的响应式适配。
+- [ ] 声明了 outputs 的插件，实际调用了 `RainCurtain.setOutput()` 写入输出值。
