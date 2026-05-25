@@ -282,7 +282,7 @@ const result = await RainCurtain.ws.createServer({ port: 8765 });
 // result = { instanceId: "ws_srv_1", port: 8765 }
 // 如果失败: { error: "Address already in use" }
 
-// 可选指定绑定地址（默认 0.0.0.0 允许局域网连接）
+// 可选指定绑定地址（默认 '::' dual-stack，同时接受 IPv4 和 IPv6 连接）
 const local = await RainCurtain.ws.createServer({ port: 0, host: '127.0.0.1' });
 ```
 
@@ -293,6 +293,9 @@ const local = await RainCurtain.ws.createServer({ port: 0, host: '127.0.0.1' });
 const result = await RainCurtain.ws.connect({ url: 'ws://192.168.1.100:8765' });
 // result = { instanceId: "ws_cli_1" }
 // 如果失败: { error: "Connection timed out" }
+
+// 连接 IPv6 地址（需用方括号包裹）
+const result6 = await RainCurtain.ws.connect({ url: 'ws://[fe80::1]:8765' });
 ```
 
 ### 事件监听
@@ -403,9 +406,18 @@ await RainCurtain.ws.closeClient(conn.instanceId, 1000, 'bye');
 ### 辅助方法
 
 ```javascript
-// 获取本机局域网 IP（用于告知对方连接地址）
+// 获取本机局域网 IPv4 地址（用于告知对方连接地址）
 const ip = await RainCurtain.ws.getLocalIP();
 // ip = "192.168.1.100"
+
+// 获取本机局域网 IPv6 地址（优先 ULA，其次 link-local）
+const ipv6 = await RainCurtain.ws.getLocalIPv6();
+// ipv6 = "fd12:3456:789a::1" 或 "fe80::abcd:1234" 或 null（无可用 IPv6）
+
+// 获取所有可用局域网 IP（IPv4 + IPv6）
+const ips = await RainCurtain.ws.getLocalIPs();
+// ips = { ipv4: "192.168.1.100", ipv6: "fd12:3456:789a::1" }
+// 如果无 IPv6: { ipv4: "192.168.1.100", ipv6: null }
 
 // 获取所有活跃 WebSocket 实例
 const instances = await RainCurtain.ws.getInstances();
@@ -449,7 +461,9 @@ async function hostRoom() {
 
 // === 加入者（客户端）===
 async function joinRoom(ip, port) {
-  const conn = await RainCurtain.ws.connect({ url: `ws://${ip}:${port}` });
+  // IPv6 地址需用方括号包裹，如 ws://[fe80::1]:9000
+  const host = ip.includes(':') ? `[${ip}]` : ip;
+  const conn = await RainCurtain.ws.connect({ url: `ws://${host}:${port}` });
   if (conn.error) { alert(conn.error); return; }
   
   RainCurtain.ws.on(conn.instanceId, 'message', (data) => {
@@ -474,7 +488,295 @@ async function joinRoom(ip, port) {
 - **自动清理**：插件页面关闭时，所有 WebSocket 连接和服务端自动关闭
 - **认证**：系统不内置认证，如需密码验证请在应用层自行实现（如连接后第一条消息进行握手）
 - **二进制传输**：通过 base64 编码在内部传输，大量二进制数据（>10MB）可能有性能影响
-- **绑定地址**：默认绑定 `0.0.0.0`（允许局域网设备连接），如仅需本机通信可指定 `host: '127.0.0.1'`
+- **绑定地址**：默认绑定 `::` (dual-stack，同时接受 IPv4 和 IPv6 连接)，如仅需本机通信可指定 `host: '127.0.0.1'` 或 `host: '::1'`
+- **IPv6 支持**：服务端默认支持 IPv6 连接；客户端连接 IPv6 地址时需用方括号包裹，如 `ws://[fe80::1]:8765`
+- **IPv6 回退**：在极少数不支持 IPv6 的环境下，服务端会自动回退到 `0.0.0.0`（仅 IPv4）
+
+---
+
+## UDP 数据报
+
+插件可以通过 `RainCurtain.udp` API 绑定 UDP socket 收发数据报。支持单播、广播和组播，适用于游戏实时通信、局域网房间发现等低延迟场景。UDP 是无连接协议，不像 WebSocket 有 server/client 区分，直接 bind 一个 socket 即可收发。
+
+### 绑定 Socket
+
+```javascript
+// 绑定 UDP socket，开始接收数据报
+// port=0 时系统自动分配端口
+// host 默认 '0.0.0.0'（接收所有网卡的数据）
+const result = await RainCurtain.udp.bind({ port: 9000 });
+// result = { instanceId: "udp_1", port: 9000 }
+// 失败: { error: "Address already in use" }
+
+// 绑定时可选开启广播
+const result = await RainCurtain.udp.bind({ port: 9000, broadcast: true });
+
+// 仅发送（不绑定接收端口，系统分配临时端口）
+const result = await RainCurtain.udp.bind({ port: 0 });
+```
+
+### 发送数据
+
+```javascript
+// 发送文本数据报到指定地址
+await RainCurtain.udp.send(instanceId, address, port, textData);
+
+// 发送二进制数据报（ArrayBuffer）
+await RainCurtain.udp.sendBinary(instanceId, address, port, arrayBuffer);
+
+// 广播（需要 bind 时 broadcast: true）
+await RainCurtain.udp.send(instanceId, '255.255.255.255', 9000, data);
+// 或子网广播
+await RainCurtain.udp.send(instanceId, '192.168.1.255', 9000, data);
+```
+
+### 事件监听
+
+所有事件通过 `RainCurtain.udp.on(instanceId, event, callback)` 注册。
+
+```javascript
+// 收到数据报
+// data 参数类型：可 UTF-8 解码时为 string，否则为 ArrayBuffer
+RainCurtain.udp.on(result.instanceId, 'message', (data, remoteAddress, remotePort) => {
+  if (typeof data === 'string') {
+    console.log(`收到文本: ${data} from ${remoteAddress}:${remotePort}`);
+  } else {
+    // data 是 ArrayBuffer
+    const bytes = new Uint8Array(data);
+    console.log(`收到二进制: ${bytes.length} bytes from ${remoteAddress}:${remotePort}`);
+  }
+});
+
+// 错误
+RainCurtain.udp.on(result.instanceId, 'error', (message) => {
+  console.error(`UDP 错误: ${message}`);
+});
+
+// Socket 关闭
+RainCurtain.udp.on(result.instanceId, 'close', () => {
+  console.log('Socket 已关闭');
+});
+```
+
+### 组播
+
+```javascript
+// 加入组播组（地址范围 224.0.0.0 - 239.255.255.255）
+await RainCurtain.udp.joinMulticast(instanceId, '239.1.2.3');
+
+// 发送到组播地址
+await RainCurtain.udp.send(instanceId, '239.1.2.3', 9000, data);
+
+// 离开组播组
+await RainCurtain.udp.leaveMulticast(instanceId, '239.1.2.3');
+```
+
+### 管理
+
+```javascript
+// 关闭 socket
+await RainCurtain.udp.close(instanceId);
+
+// 设置广播开关（绑定后也可更改）
+await RainCurtain.udp.setBroadcast(instanceId, true);
+
+// 获取所有活跃 UDP 实例
+const instances = await RainCurtain.udp.getInstances();
+// instances = [{ instanceId: "udp_1", port: 9000, address: "0.0.0.0" }, ...]
+
+// 移除事件监听
+RainCurtain.udp.off(instanceId, 'message', myCallback);
+// 移除某事件所有监听（不传 callback）
+RainCurtain.udp.off(instanceId, 'message');
+```
+
+### 完整示例：局域网房间发现（广播）
+
+```javascript
+// === 服务端：绑定端口，等待发现请求 ===
+async function hostRoom() {
+  const server = await RainCurtain.udp.bind({ port: 9000, broadcast: true });
+  if (server.error) { alert(server.error); return; }
+
+  RainCurtain.udp.on(server.instanceId, 'message', (data, addr, port) => {
+    if (data === 'DISCOVER') {
+      RainCurtain.udp.send(server.instanceId, addr, port,
+        JSON.stringify({ name: '我的房间', players: 1 }));
+    }
+  });
+}
+
+// === 客户端：广播发现请求 ===
+async function discoverRooms() {
+  const client = await RainCurtain.udp.bind({ port: 0, broadcast: true });
+  if (client.error) { alert(client.error); return; }
+
+  RainCurtain.udp.on(client.instanceId, 'message', (data, addr, port) => {
+    const room = JSON.parse(data);
+    console.log(`发现房间: ${room.name} at ${addr}:${port}`);
+  });
+
+  await RainCurtain.udp.send(client.instanceId, '255.255.255.255', 9000, 'DISCOVER');
+}
+```
+
+### 注意事项
+
+- **端口范围**：绑定端口必须在 1024-65535 之间（或传 0 自动分配）
+- **资源限制**：单个插件最多 10 个 UDP socket 实例
+- **自动清理**：插件页面关闭时，所有 UDP socket 自动关闭
+- **无连接**：UDP 不保证送达和顺序，适合实时性要求高、可容忍丢包的场景
+- **广播**：发送到 `255.255.255.255` 或子网广播地址前，需确保 `broadcast: true`
+- **组播地址**：必须在 224.0.0.0 - 239.255.255.255 范围内
+- **数据大小**：单个 UDP 数据报建议不超过 MTU（通常 1472 bytes），超大数据报可能被分片或丢弃
+- **绑定地址**：默认绑定 `0.0.0.0`（IPv4 any），广播仅在 IPv4 下有效
+- **与 WebSocket 关系**：UDP 和 WebSocket 是独立 API，可同时使用。WS 适合可靠有序传输，UDP 适合低延迟实时数据
+
+---
+
+## DNS 解析
+
+插件可以通过 `RainCurtain.dns` API 执行 DNS 域名解析。支持多种记录类型（A、AAAA、MX、CNAME、TXT、NS、SRV、PTR）、自定义 DNS 服务器和批量解析。底层通过纯 Dart 实现 DNS 协议（RFC 1035），直接发送 UDP 报文到 DNS 服务器的 53 端口。
+
+### 单域名解析
+
+```javascript
+// 基础 A 记录查询
+const result = await RainCurtain.dns.resolve('google.com');
+// result = {
+//   domain: "google.com",
+//   type: "A",
+//   server: "8.8.8.8",
+//   timeMs: 23,
+//   records: [{ address: "142.250.80.46", ttl: 300 }]
+// }
+
+// 指定记录类型和 DNS 服务器
+const mx = await RainCurtain.dns.resolve('gmail.com', {
+  type: 'MX',
+  server: '1.1.1.1'
+});
+// mx = {
+//   domain: "gmail.com", type: "MX", server: "1.1.1.1", timeMs: 35,
+//   records: [{ priority: 5, exchange: "gmail-smtp-in.l.google.com", ttl: 3600 }]
+// }
+
+// 查询 AAAA 记录（IPv6）
+const ipv6 = await RainCurtain.dns.resolve('google.com', { type: 'AAAA' });
+
+// 查询 TXT 记录（SPF、DKIM 等）
+const txt = await RainCurtain.dns.resolve('google.com', { type: 'TXT' });
+// records: [{ text: "v=spf1 include:_spf.google.com ~all", ttl: 3600 }]
+
+// 查询 CNAME 记录
+const cname = await RainCurtain.dns.resolve('www.example.com', { type: 'CNAME' });
+// records: [{ name: "example.com", ttl: 300 }]
+
+// 查询 NS 记录
+const ns = await RainCurtain.dns.resolve('example.com', { type: 'NS' });
+// records: [{ nameserver: "ns1.example.com", ttl: 86400 }]
+
+// 查询 SRV 记录
+const srv = await RainCurtain.dns.resolve('_sip._tcp.example.com', { type: 'SRV' });
+// records: [{ priority: 10, weight: 60, port: 5060, target: "sip.example.com", ttl: 3600 }]
+
+// 查询 PTR 记录（反向解析）
+const ptr = await RainCurtain.dns.resolve('34.216.184.93.in-addr.arpa', { type: 'PTR' });
+// records: [{ name: "example.com", ttl: 3600 }]
+```
+
+### 选项参数
+
+```javascript
+const result = await RainCurtain.dns.resolve(domain, {
+  type: 'A',        // 记录类型: A, AAAA, MX, CNAME, TXT, NS, SRV, PTR（默认 'A'）
+  server: null,     // 自定义 DNS 服务器地址（默认 '8.8.8.8'）
+  port: 53,         // DNS 服务器端口（默认 53）
+  timeout: 5000     // 超时时间 ms（默认 5000，最大 30000）
+});
+```
+
+### 批量解析
+
+```javascript
+const batch = await RainCurtain.dns.resolveAll([
+  { domain: 'google.com', type: 'A' },
+  { domain: 'github.com', type: 'AAAA' },
+  { domain: 'gmail.com', type: 'MX' },
+], {
+  server: '8.8.8.8',   // 全局 DNS 服务器
+  concurrency: 3,       // 并发数（默认 5，最大 10）
+  timeout: 5000         // 每个查询的超时时间
+});
+// batch = {
+//   totalTimeMs: 156,
+//   results: [
+//     { domain: "google.com", type: "A", records: [...] },
+//     { domain: "github.com", type: "AAAA", records: [...] },
+//     { domain: "gmail.com", type: "MX", records: [...] }
+//   ]
+// }
+
+// 部分失败不影响其他查询
+// results: [
+//   { domain: "valid.com", type: "A", records: [...] },
+//   { domain: "invalid.xxx", type: "A", error: "NXDOMAIN" }
+// ]
+```
+
+### 错误处理
+
+```javascript
+const result = await RainCurtain.dns.resolve('nonexistent.invalid');
+if (result.error) {
+  console.error(result.error);
+  // 可能的错误:
+  // "NXDOMAIN"          — 域名不存在
+  // "SERVFAIL"          — DNS 服务器内部错误
+  // "REFUSED"           — DNS 服务器拒绝查询
+  // "Query timed out"   — 查询超时
+  // "Invalid domain format" — 域名格式无效
+  // "Unsupported record type: XXX" — 不支持的记录类型
+  // "Network error: ..."  — 网络连接失败
+}
+```
+
+### 完整示例：DNS 查询工具
+
+```javascript
+async function lookupDomain(domain) {
+  // 查询 A 和 AAAA 记录
+  const batch = await RainCurtain.dns.resolveAll([
+    { domain, type: 'A' },
+    { domain, type: 'AAAA' },
+    { domain, type: 'MX' },
+    { domain, type: 'NS' },
+    { domain, type: 'TXT' },
+  ], { server: '8.8.8.8', concurrency: 5 });
+
+  for (const result of batch.results) {
+    if (result.error) {
+      console.log(`${result.type}: ${result.error}`);
+    } else {
+      console.log(`${result.type}: ${JSON.stringify(result.records)}`);
+    }
+  }
+  console.log(`总耗时: ${batch.totalTimeMs}ms`);
+}
+
+lookupDomain('example.com');
+```
+
+### 注意事项
+
+- **无需事件监听**：DNS 是纯请求-响应模式，不需要 `on/off` 事件机制
+- **默认服务器**：未指定 `server` 时默认使用 Google DNS (8.8.8.8)
+- **批量限制**：单次 `resolveAll` 最多 50 个查询
+- **并发控制**：`concurrency` 范围 1-10，控制同时发送的 UDP 请求数
+- **超时**：单个查询最大超时 30 秒（默认 5 秒）
+- **自动清理**：DNS 查询是无状态的，不持有长期资源，无需手动关闭
+- **记录类型**：仅支持 A、AAAA、MX、CNAME、TXT、NS、SRV、PTR
+- **TTL**：每条记录包含 `ttl` 字段（秒），表示 DNS 缓存有效期
 
 ---
 

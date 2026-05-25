@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
+import 'self_signed_certificate.dart';
 
 /// WebSocket 服务端实例
 class WsServerInstance {
@@ -64,9 +65,11 @@ class WsManager {
   /// 创建 WebSocket 服务端
   /// [port] 监听端口，0 表示系统自动分配
   /// [host] 绑定地址，默认 '0.0.0.0'（允许局域网连接）
+  /// [useTLS] 是否启用 TLS（wss://），启用后自动生成自签证书
   Future<Map<String, dynamic>> createServer({
     int port = 0,
     String host = '0.0.0.0',
+    bool useTLS = false,
   }) async {
     if (_servers.length >= maxServers) {
       return {'error': 'Max server limit reached ($maxServers)'};
@@ -78,7 +81,16 @@ class WsManager {
     }
 
     try {
-      final server = await HttpServer.bind(host, port);
+      HttpServer server;
+
+      if (useTLS) {
+        // 运行时生成自签证书，创建安全服务器
+        final securityContext = await _createSelfSignedContext();
+        server = await HttpServer.bindSecure(host, port, securityContext);
+      } else {
+        server = await HttpServer.bind(host, port);
+      }
+
       final actualPort = server.port;
       final instanceId = _nextInstanceId('ws_srv');
 
@@ -93,7 +105,11 @@ class WsManager {
         (HttpRequest request) async {
           if (WebSocketTransformer.isUpgradeRequest(request)) {
             try {
-              final ws = await WebSocketTransformer.upgrade(request);
+              // 禁用 WebSocket 压缩，避免通过代理/隧道时压缩协商失败
+              final ws = await WebSocketTransformer.upgrade(
+                request,
+                compression: CompressionOptions.compressionOff,
+              );
               _handleNewClient(instance, ws, request);
             } catch (e) {
               debugPrint('[WsManager] WebSocket upgrade failed: $e');
@@ -122,7 +138,7 @@ class WsManager {
       _servers[instanceId] = instance;
       debugPrint(
           '[WsManager] Server created: $instanceId on port $actualPort');
-      return {'instanceId': instanceId, 'port': actualPort};
+      return {'instanceId': instanceId, 'port': actualPort, 'tls': useTLS};
     } catch (e) {
       debugPrint('[WsManager] Failed to create server: $e');
       return {'error': e.toString()};
@@ -319,14 +335,26 @@ class WsManager {
   // ==================== 客户端 API ====================
 
   /// 连接到远程 WebSocket 服务端
-  /// [url] WebSocket URL，如 'ws://192.168.1.2:8765'
+  /// [url] WebSocket URL，如 'ws://192.168.1.2:8765' 或 'wss://...'
+  /// 当 URL 使用 wss:// 时自动跳过自签证书验证
   Future<Map<String, dynamic>> connect({required String url}) async {
     if (_clients.length >= maxClients) {
       return {'error': 'Max client limit reached ($maxClients)'};
     }
 
     try {
-      final ws = await WebSocket.connect(url).timeout(
+      // 对于 wss:// 连接，需要创建允许自签证书的 HttpClient
+      HttpClient? customClient;
+      if (url.startsWith('wss://')) {
+        customClient = HttpClient()
+          ..badCertificateCallback = (cert, host, port) => true;
+      }
+
+      final ws = await WebSocket.connect(
+        url,
+        compression: CompressionOptions.compressionOff,
+        customClient: customClient,
+      ).timeout(
         const Duration(seconds: 10),
         onTimeout: () => throw TimeoutException('Connection timed out'),
       );
@@ -510,6 +538,34 @@ class WsManager {
     return second >= 16 && second <= 31;
   }
 
+  /// 获取本机局域网 IPv6 地址
+  static Future<String?> getLocalIPv6() async {
+    try {
+      final interfaces = await NetworkInterface.list(
+        type: InternetAddressType.IPv6,
+        includeLoopback: false,
+      );
+      for (final iface in interfaces) {
+        for (final addr in iface.addresses) {
+          if (addr.isLoopback) continue;
+          // 跳过链路本地地址 (fe80::)
+          if (addr.address.startsWith('fe80:')) continue;
+          return addr.address;
+        }
+      }
+    } catch (e) {
+      debugPrint('[WsManager] Failed to get local IPv6: $e');
+    }
+    return null;
+  }
+
+  /// 获取本机所有局域网 IP（IPv4 + IPv6）
+  static Future<Map<String, dynamic>> getLocalIPs() async {
+    final ipv4 = await getLocalIP();
+    final ipv6 = await getLocalIPv6();
+    return {'ipv4': ipv4, 'ipv6': ipv6};
+  }
+
   /// 释放所有资源（WebView dispose 时调用）
   Future<void> disposeAll() async {
     debugPrint(
@@ -530,5 +586,23 @@ class WsManager {
         await closeServer(id);
       } catch (_) {}
     }
+  }
+
+  // ==================== TLS 支持 ====================
+
+  /// 生成自签证书并创建 SecurityContext
+  static Future<SecurityContext> _createSelfSignedContext() async {
+    debugPrint('[WsManager] Generating self-signed certificate...');
+    final cert = SelfSignedCertificate.generate(
+      commonName: 'RainCurtain WebSocket Server',
+      validDays: 3650,
+    );
+    final paths = await cert.writeToTempFiles();
+    debugPrint('[WsManager] Certificate written to: ${paths.certPath}');
+
+    final context = SecurityContext()
+      ..useCertificateChain(paths.certPath)
+      ..usePrivateKey(paths.keyPath);
+    return context;
   }
 }

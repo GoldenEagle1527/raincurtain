@@ -15,7 +15,9 @@ import '../models/plugin_manager.dart';
 import '../models/plugin_data_manager.dart';
 import '../models/pool_manager.dart';
 import '../models/variable_pool_manager.dart';
+import '../models/udp_manager.dart';
 import '../models/ws_manager.dart';
+import '../models/dns_manager.dart';
 import '../main.dart' show sandboxServerPort;
 
 /// 网络请求性能指标
@@ -185,12 +187,20 @@ class PluginWebViewState extends State<PluginWebView>
   // WebSocket 实例管理器
   late final WsManager _wsManager;
 
+  // UDP 实例管理器
+  late final UdpManager _udpManager;
+
+  // DNS 解析管理器
+  late final DnsManager _dnsManager;
+
   @override
   void initState() {
     super.initState();
     _initNotifications();
     HardwareKeyboard.instance.addHandler(_handleKeyEvent);
     _wsManager = WsManager(onEvent: _pushWsEvent);
+    _udpManager = UdpManager(onEvent: _pushUdpEvent);
+    _dnsManager = DnsManager();
   }
 
   @override
@@ -498,6 +508,18 @@ class PluginWebViewState extends State<PluginWebView>
     );
   }
 
+  /// 推送 UDP 事件到 JS 侧
+  void _pushUdpEvent(
+      String instanceId, String event, Map<String, dynamic> payload) {
+    if (webViewController == null) return;
+    final payloadJson = jsonEncode(payload);
+    // 使用 JSON.parse 避免字符串中特殊字符问题（与 WS 同模式）
+    webViewController?.evaluateJavascript(
+      source:
+          'if(window.__rc_udp_event) window.__rc_udp_event("$instanceId", "$event", JSON.parse(${jsonEncode(payloadJson)}));',
+    );
+  }
+
   @override
   void dispose() {
     HardwareKeyboard.instance.removeHandler(_handleKeyEvent);
@@ -513,6 +535,10 @@ class PluginWebViewState extends State<PluginWebView>
     _requestCache.clear();
     // 关闭所有 WebSocket 连接和服务端
     _wsManager.disposeAll();
+    // 关闭所有 UDP socket
+    _udpManager.disposeAll();
+    // 释放 DNS 管理器
+    _dnsManager.dispose();
     // 释放 WebView 控制器引用
     webViewController = null;
     super.dispose();
@@ -1948,6 +1974,24 @@ class PluginWebViewState extends State<PluginWebView>
       }
     },
 
+    getLocalIPv6: async function() {
+      try {
+        return await _call('rc_ws_get_local_ipv6', {});
+      } catch (e) {
+        console.error('RainCurtain.ws.getLocalIPv6 error:', e);
+        return null;
+      }
+    },
+
+    getLocalIPs: async function() {
+      try {
+        return await _call('rc_ws_get_local_ips', {});
+      } catch (e) {
+        console.error('RainCurtain.ws.getLocalIPs error:', e);
+        return { ipv4: '127.0.0.1', ipv6: null };
+      }
+    },
+
     getInstances: async function() {
       try {
         return await _call('rc_ws_get_instances', {});
@@ -1975,6 +2019,250 @@ class PluginWebViewState extends State<PluginWebView>
       } else {
         // 未传 callback 则移除该事件所有监听
         delete _listeners[instanceId][event];
+      }
+    }
+  };
+})();
+""";
+
+  /// UDP API polyfill — 注入 window.RainCurtain.udp
+  static const String _udpPolyfillJS = r"""
+(function() {
+  if (window.__rc_udp_patched) return;
+  window.__rc_udp_patched = true;
+
+  var _listeners = {}; // instanceId -> { event -> [cb] }
+  var _buffer = {};    // instanceId -> [{event, payload}]  事件缓冲
+
+  function _call(handler, args) {
+    if (!window.flutter_inappwebview) return Promise.resolve(null);
+    return window.flutter_inappwebview.callHandler(handler, args);
+  }
+
+  // base64 → ArrayBuffer
+  function _b64ToArrayBuffer(b64) {
+    var raw = atob(b64);
+    var arr = new Uint8Array(raw.length);
+    for (var i = 0; i < raw.length; i++) arr[i] = raw.charCodeAt(i);
+    return arr.buffer;
+  }
+
+  // 分发单个事件到回调
+  function _dispatch(instanceId, event, payload, cbs) {
+    var list = cbs.slice();
+    for (var i = 0; i < list.length; i++) {
+      try {
+        switch (event) {
+          case 'message':
+            // payload: { data (base64), text (string|null), address, port }
+            // text 非 null 时传文本，否则传 ArrayBuffer
+            if (payload.text !== null && payload.text !== undefined) {
+              list[i](payload.text, payload.address, payload.port);
+            } else {
+              var buf = _b64ToArrayBuffer(payload.data);
+              list[i](buf, payload.address, payload.port);
+            }
+            break;
+          case 'error':
+            list[i](payload.message);
+            break;
+          case 'close':
+            list[i]();
+            break;
+          default:
+            list[i](payload);
+        }
+      } catch (e) {
+        console.error('[RainCurtain.udp] Event callback error:', event, e);
+      }
+    }
+  }
+
+  // Flutter 侧推送事件的入口
+  window.__rc_udp_event = function(instanceId, event, payload) {
+    var cbs = _listeners[instanceId] && _listeners[instanceId][event];
+    if (cbs && cbs.length > 0) {
+      // 有监听器，直接分发
+      _dispatch(instanceId, event, payload, cbs);
+    } else {
+      // 无监听器，缓冲事件（等 on() 注册时 flush）
+      if (!_buffer[instanceId]) _buffer[instanceId] = [];
+      _buffer[instanceId].push({ event: event, payload: payload });
+    }
+  };
+
+  // flush 指定 instance 的缓冲事件
+  function _flushBuffer(instanceId) {
+    var buf = _buffer[instanceId];
+    if (!buf || buf.length === 0) return;
+    // 取出并清空缓冲（防止 flush 过程中新事件重复处理）
+    _buffer[instanceId] = [];
+    for (var i = 0; i < buf.length; i++) {
+      var ev = buf[i];
+      var cbs = _listeners[instanceId] && _listeners[instanceId][ev.event];
+      if (cbs && cbs.length > 0) {
+        _dispatch(instanceId, ev.event, ev.payload, cbs);
+      } else {
+        // 仍然没有对应监听器，放回缓冲
+        if (!_buffer[instanceId]) _buffer[instanceId] = [];
+        _buffer[instanceId].push(ev);
+      }
+    }
+  }
+
+  // 确保 RainCurtain 对象存在（此脚本在 RainCurtain API 之后注入）
+  if (!window.RainCurtain) window.RainCurtain = {};
+
+  window.RainCurtain.udp = {
+    bind: async function(options) {
+      try {
+        return await _call('rc_udp_bind', options || {});
+      } catch (e) {
+        console.error('RainCurtain.udp.bind error:', e);
+        return { error: e.message || String(e) };
+      }
+    },
+
+    send: async function(instanceId, address, port, data) {
+      try {
+        return await _call('rc_udp_send', { instanceId: instanceId, address: address, port: port, data: data });
+      } catch (e) {
+        console.error('RainCurtain.udp.send error:', e);
+        return { error: e.message || String(e) };
+      }
+    },
+
+    sendBinary: async function(instanceId, address, port, arrayBuffer) {
+      try {
+        var bytes = new Uint8Array(arrayBuffer);
+        var binary = '';
+        for (var i = 0; i < bytes.length; i++) {
+          binary += String.fromCharCode(bytes[i]);
+        }
+        var base64 = btoa(binary);
+        return await _call('rc_udp_send_binary', { instanceId: instanceId, address: address, port: port, data: base64 });
+      } catch (e) {
+        console.error('RainCurtain.udp.sendBinary error:', e);
+        return { error: e.message || String(e) };
+      }
+    },
+
+    close: async function(instanceId) {
+      try {
+        delete _listeners[instanceId];
+        delete _buffer[instanceId];
+        return await _call('rc_udp_close', { instanceId: instanceId });
+      } catch (e) {
+        console.error('RainCurtain.udp.close error:', e);
+        return { error: e.message || String(e) };
+      }
+    },
+
+    setBroadcast: async function(instanceId, enabled) {
+      try {
+        return await _call('rc_udp_set_broadcast', { instanceId: instanceId, enabled: enabled });
+      } catch (e) {
+        console.error('RainCurtain.udp.setBroadcast error:', e);
+        return { error: e.message || String(e) };
+      }
+    },
+
+    joinMulticast: async function(instanceId, address) {
+      try {
+        return await _call('rc_udp_join_multicast', { instanceId: instanceId, address: address });
+      } catch (e) {
+        console.error('RainCurtain.udp.joinMulticast error:', e);
+        return { error: e.message || String(e) };
+      }
+    },
+
+    leaveMulticast: async function(instanceId, address) {
+      try {
+        return await _call('rc_udp_leave_multicast', { instanceId: instanceId, address: address });
+      } catch (e) {
+        console.error('RainCurtain.udp.leaveMulticast error:', e);
+        return { error: e.message || String(e) };
+      }
+    },
+
+    getInstances: async function() {
+      try {
+        return await _call('rc_udp_get_instances', {});
+      } catch (e) {
+        console.error('RainCurtain.udp.getInstances error:', e);
+        return [];
+      }
+    },
+
+    on: function(instanceId, event, callback) {
+      if (!instanceId || !event || typeof callback !== 'function') return;
+      if (!_listeners[instanceId]) _listeners[instanceId] = {};
+      if (!_listeners[instanceId][event]) _listeners[instanceId][event] = [];
+      _listeners[instanceId][event].push(callback);
+      // 注册监听器后立即 flush 缓冲，将之前到达的事件投递出去
+      _flushBuffer(instanceId);
+    },
+
+    off: function(instanceId, event, callback) {
+      var cbs = _listeners[instanceId] && _listeners[instanceId][event];
+      if (!cbs) return;
+      if (callback) {
+        var idx = cbs.indexOf(callback);
+        if (idx !== -1) cbs.splice(idx, 1);
+      } else {
+        // 未传 callback 则移除该事件所有监听
+        delete _listeners[instanceId][event];
+      }
+    }
+  };
+})();
+""";
+
+  /// DNS API polyfill — 注入 window.RainCurtain.dns
+  static const String _dnsPolyfillJS = r"""
+(function() {
+  if (window.__rc_dns_patched) return;
+  window.__rc_dns_patched = true;
+
+  function _call(handler, args) {
+    if (!window.flutter_inappwebview) return Promise.resolve(null);
+    return window.flutter_inappwebview.callHandler(handler, args);
+  }
+
+  // 确保 RainCurtain 对象存在
+  if (!window.RainCurtain) window.RainCurtain = {};
+
+  window.RainCurtain.dns = {
+    resolve: async function(domain, options) {
+      try {
+        options = options || {};
+        return await _call('rc_dns_resolve', {
+          domain: domain,
+          type: options.type || 'A',
+          server: options.server || null,
+          port: options.port || 53,
+          timeout: options.timeout || 5000
+        });
+      } catch (e) {
+        return { error: e.message || String(e) };
+      }
+    },
+
+    resolveAll: async function(queries, options) {
+      try {
+        if (!Array.isArray(queries) || queries.length === 0) {
+          return { error: 'queries must be a non-empty array' };
+        }
+        options = options || {};
+        return await _call('rc_dns_resolve_all', {
+          queries: queries,
+          server: options.server || null,
+          port: options.port || 53,
+          timeout: options.timeout || 5000,
+          concurrency: options.concurrency || 5
+        });
+      } catch (e) {
+        return { error: e.message || String(e) };
       }
     }
   };
@@ -2122,6 +2410,16 @@ class PluginWebViewState extends State<PluginWebView>
             // 注入 WebSocket API 脚本（RainCurtain.ws）
             UserScript(
               source: _wsPolyfillJS,
+              injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
+            ),
+            // 注入 UDP API 脚本（RainCurtain.udp）
+            UserScript(
+              source: _udpPolyfillJS,
+              injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
+            ),
+            // 注入 DNS API 脚本（RainCurtain.dns）
+            UserScript(
+              source: _dnsPolyfillJS,
               injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
             ),
             // Windows 平台注入滚动修复脚本，解决 WebView2 滚轮事件问题
@@ -3256,8 +3554,9 @@ class PluginWebViewState extends State<PluginWebView>
         try {
           final data = args.isNotEmpty ? args[0] as Map<dynamic, dynamic> : {};
           final port = (data['port'] as num?)?.toInt() ?? 0;
-          final host = data['host'] as String? ?? '0.0.0.0';
-          return await _wsManager.createServer(port: port, host: host);
+          final host = data['host'] as String? ?? '::';
+          final useTLS = data['tls'] as bool? ?? false;
+          return await _wsManager.createServer(port: port, host: host, useTLS: useTLS);
         } catch (e) {
           debugPrint('rc_ws_create_server error: $e');
           return {'error': e.toString()};
@@ -3465,6 +3764,32 @@ class PluginWebViewState extends State<PluginWebView>
       },
     );
 
+    // 获取本机局域网 IPv6 地址
+    controller.addJavaScriptHandler(
+      handlerName: 'rc_ws_get_local_ipv6',
+      callback: (args) async {
+        try {
+          return await WsManager.getLocalIPv6();
+        } catch (e) {
+          debugPrint('rc_ws_get_local_ipv6 error: $e');
+          return null;
+        }
+      },
+    );
+
+    // 获取所有局域网 IP（IPv4 + IPv6）
+    controller.addJavaScriptHandler(
+      handlerName: 'rc_ws_get_local_ips',
+      callback: (args) async {
+        try {
+          return await WsManager.getLocalIPs();
+        } catch (e) {
+          debugPrint('rc_ws_get_local_ips error: $e');
+          return {'ipv4': '127.0.0.1', 'ipv6': null};
+        }
+      },
+    );
+
     // 获取所有活跃 WS 实例
     controller.addJavaScriptHandler(
       handlerName: 'rc_ws_get_instances',
@@ -3474,6 +3799,217 @@ class PluginWebViewState extends State<PluginWebView>
         } catch (e) {
           debugPrint('rc_ws_get_instances error: $e');
           return [];
+        }
+      },
+    );
+
+    // ========== UDP API Handlers ==========
+
+    // 绑定 UDP socket
+    controller.addJavaScriptHandler(
+      handlerName: 'rc_udp_bind',
+      callback: (args) async {
+        try {
+          final data = args.isNotEmpty ? args[0] as Map<dynamic, dynamic> : {};
+          final port = (data['port'] as num?)?.toInt() ?? 0;
+          final host = data['host'] as String? ?? '0.0.0.0';
+          final broadcast = data['broadcast'] as bool? ?? false;
+          return await _udpManager.bind(port: port, host: host, broadcast: broadcast);
+        } catch (e) {
+          debugPrint('rc_udp_bind error: $e');
+          return {'error': e.toString()};
+        }
+      },
+    );
+
+    // 发送文本数据报
+    controller.addJavaScriptHandler(
+      handlerName: 'rc_udp_send',
+      callback: (args) async {
+        try {
+          if (args.isEmpty) return {'error': 'Missing arguments'};
+          final data = args[0] as Map<dynamic, dynamic>;
+          final instanceId = data['instanceId'] as String?;
+          final address = data['address'] as String?;
+          final port = (data['port'] as num?)?.toInt();
+          final message = data['data'] as String?;
+          if (instanceId == null || address == null || port == null || message == null) {
+            return {'error': 'Missing instanceId, address, port or data'};
+          }
+          return _udpManager.send(instanceId, address, port, message);
+        } catch (e) {
+          debugPrint('rc_udp_send error: $e');
+          return {'error': e.toString()};
+        }
+      },
+    );
+
+    // 发送二进制数据报
+    controller.addJavaScriptHandler(
+      handlerName: 'rc_udp_send_binary',
+      callback: (args) async {
+        try {
+          if (args.isEmpty) return {'error': 'Missing arguments'};
+          final data = args[0] as Map<dynamic, dynamic>;
+          final instanceId = data['instanceId'] as String?;
+          final address = data['address'] as String?;
+          final port = (data['port'] as num?)?.toInt();
+          final b64Data = data['data'] as String?;
+          if (instanceId == null || address == null || port == null || b64Data == null) {
+            return {'error': 'Missing instanceId, address, port or data'};
+          }
+          final bytes = base64Decode(b64Data);
+          return _udpManager.sendBinary(instanceId, address, port, Uint8List.fromList(bytes));
+        } catch (e) {
+          debugPrint('rc_udp_send_binary error: $e');
+          return {'error': e.toString()};
+        }
+      },
+    );
+
+    // 关闭 UDP socket
+    controller.addJavaScriptHandler(
+      handlerName: 'rc_udp_close',
+      callback: (args) async {
+        try {
+          if (args.isEmpty) return {'error': 'Missing arguments'};
+          final data = args[0] as Map<dynamic, dynamic>;
+          final instanceId = data['instanceId'] as String?;
+          if (instanceId == null) {
+            return {'error': 'Missing instanceId'};
+          }
+          return await _udpManager.close(instanceId);
+        } catch (e) {
+          debugPrint('rc_udp_close error: $e');
+          return {'error': e.toString()};
+        }
+      },
+    );
+
+    // 设置广播开关
+    controller.addJavaScriptHandler(
+      handlerName: 'rc_udp_set_broadcast',
+      callback: (args) async {
+        try {
+          if (args.isEmpty) return {'error': 'Missing arguments'};
+          final data = args[0] as Map<dynamic, dynamic>;
+          final instanceId = data['instanceId'] as String?;
+          final enabled = data['enabled'] as bool?;
+          if (instanceId == null || enabled == null) {
+            return {'error': 'Missing instanceId or enabled'};
+          }
+          return _udpManager.setBroadcast(instanceId, enabled);
+        } catch (e) {
+          debugPrint('rc_udp_set_broadcast error: $e');
+          return {'error': e.toString()};
+        }
+      },
+    );
+
+    // 加入组播组
+    controller.addJavaScriptHandler(
+      handlerName: 'rc_udp_join_multicast',
+      callback: (args) async {
+        try {
+          if (args.isEmpty) return {'error': 'Missing arguments'};
+          final data = args[0] as Map<dynamic, dynamic>;
+          final instanceId = data['instanceId'] as String?;
+          final address = data['address'] as String?;
+          if (instanceId == null || address == null) {
+            return {'error': 'Missing instanceId or address'};
+          }
+          return _udpManager.joinMulticast(instanceId, address);
+        } catch (e) {
+          debugPrint('rc_udp_join_multicast error: $e');
+          return {'error': e.toString()};
+        }
+      },
+    );
+
+    // 离开组播组
+    controller.addJavaScriptHandler(
+      handlerName: 'rc_udp_leave_multicast',
+      callback: (args) async {
+        try {
+          if (args.isEmpty) return {'error': 'Missing arguments'};
+          final data = args[0] as Map<dynamic, dynamic>;
+          final instanceId = data['instanceId'] as String?;
+          final address = data['address'] as String?;
+          if (instanceId == null || address == null) {
+            return {'error': 'Missing instanceId or address'};
+          }
+          return _udpManager.leaveMulticast(instanceId, address);
+        } catch (e) {
+          debugPrint('rc_udp_leave_multicast error: $e');
+          return {'error': e.toString()};
+        }
+      },
+    );
+
+    // 获取所有活跃 UDP 实例
+    controller.addJavaScriptHandler(
+      handlerName: 'rc_udp_get_instances',
+      callback: (args) async {
+        try {
+          return _udpManager.getInstances();
+        } catch (e) {
+          debugPrint('rc_udp_get_instances error: $e');
+          return [];
+        }
+      },
+    );
+
+    // ========== DNS API Handlers ==========
+
+    // 单个域名 DNS 解析
+    controller.addJavaScriptHandler(
+      handlerName: 'rc_dns_resolve',
+      callback: (args) async {
+        try {
+          if (args.isEmpty) return {'error': 'Missing arguments'};
+          final data = args[0] as Map<dynamic, dynamic>;
+          final domain = data['domain'] as String?;
+          if (domain == null || domain.isEmpty) {
+            return {'error': 'Missing domain'};
+          }
+          return await _dnsManager.resolve(
+            domain: domain,
+            type: data['type'] as String? ?? 'A',
+            server: data['server'] as String?,
+            port: (data['port'] as num?)?.toInt() ?? 53,
+            timeoutMs: (data['timeout'] as num?)?.toInt() ?? 5000,
+          );
+        } catch (e) {
+          debugPrint('rc_dns_resolve error: $e');
+          return {'error': e.toString()};
+        }
+      },
+    );
+
+    // 批量 DNS 解析
+    controller.addJavaScriptHandler(
+      handlerName: 'rc_dns_resolve_all',
+      callback: (args) async {
+        try {
+          if (args.isEmpty) return {'error': 'Missing arguments'};
+          final data = args[0] as Map<dynamic, dynamic>;
+          final queriesRaw = data['queries'] as List?;
+          if (queriesRaw == null || queriesRaw.isEmpty) {
+            return {'error': 'queries must be a non-empty array'};
+          }
+          final queries = queriesRaw
+              .map((q) => Map<String, dynamic>.from(q as Map))
+              .toList();
+          return await _dnsManager.resolveAll(
+            queries: queries,
+            server: data['server'] as String?,
+            port: (data['port'] as num?)?.toInt() ?? 53,
+            timeoutMs: (data['timeout'] as num?)?.toInt() ?? 5000,
+            concurrency: (data['concurrency'] as num?)?.toInt() ?? 5,
+          );
+        } catch (e) {
+          debugPrint('rc_dns_resolve_all error: $e');
+          return {'error': e.toString()};
         }
       },
     );

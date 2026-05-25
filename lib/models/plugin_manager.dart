@@ -129,6 +129,16 @@ class PluginManager extends ChangeNotifier {
     _plugins = loaded;
   }
 
+  /// 重新从磁盘读取并加载插件列表
+  Future<void> reloadPlugins() async {
+    try {
+      await _loadPlugins();
+    } catch (e) {
+      debugPrint('reloadPlugins failed: $e');
+    }
+    notifyListeners();
+  }
+
   Future<void> _savePlugins() async {
     final db = DatabaseManager.database;
     await db.transaction((txn) async {

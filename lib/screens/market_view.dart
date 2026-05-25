@@ -29,11 +29,22 @@ class MarketView extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               // 插件列表标题
-              Text(
-                '已安装的插件 (${plugins.length})',
-                style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                  color: colorScheme.onSurface,
-                ),
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      '已安装的插件 (${plugins.length})',
+                      style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                        color: colorScheme.onSurface,
+                      ),
+                    ),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.refresh),
+                    tooltip: '刷新插件列表',
+                    onPressed: () => pluginManager.reloadPlugins(),
+                  ),
+                ],
               ),
               SizedBox(height: padding * 0.5),
               // 插件列表
