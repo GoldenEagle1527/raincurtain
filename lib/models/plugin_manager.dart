@@ -130,13 +130,98 @@ class PluginManager extends ChangeNotifier {
   }
 
   /// 重新从磁盘读取并加载插件列表
+  /// 同时扫描沙箱目录，发现未注册到数据库的新插件并自动注册
   Future<void> reloadPlugins() async {
     try {
+      await _scanAndRegisterNewPlugins();
       await _loadPlugins();
     } catch (e) {
       debugPrint('reloadPlugins failed: $e');
     }
     notifyListeners();
+  }
+
+  /// 扫描沙箱目录，将磁盘上存在但数据库中未注册的插件自动注册
+  Future<void> _scanAndRegisterNewPlugins() async {
+    if (!await sandboxDir.exists()) return;
+
+    final db = DatabaseManager.database;
+    // 获取数据库中已注册的 plugin_id 集合
+    final rows = await db.query('plugins', columns: ['plugin_id']);
+    final registeredIds = rows.map((r) => r['plugin_id'] as String).toSet();
+
+    // 获取当前最大 sort_order
+    final maxOrderResult = await db.rawQuery('SELECT MAX(sort_order) as max_order FROM plugins');
+    int nextOrder = (maxOrderResult.first['max_order'] as int? ?? -1) + 1;
+
+    // 扫描沙箱目录的一级子目录（每个子目录是一个 pluginId）
+    final entities = await sandboxDir.list().toList();
+    for (final entity in entities) {
+      if (entity is! Directory) continue;
+
+      final pluginIdDir = entity;
+      final pluginId = p.basename(pluginIdDir.path);
+
+      // 跳过已注册的
+      if (registeredIds.contains(pluginId)) continue;
+
+      // 尝试在此目录下找到 manifest.yml
+      try {
+        final manifestFile = await _findManifestInPluginDir(pluginIdDir);
+        if (manifestFile == null) continue;
+
+        final manifest = await _readManifest(manifestFile);
+        final entryPath = await _findEntryPathInDir(pluginIdDir, pluginId);
+        if (entryPath == null) continue;
+
+        // 注册到数据库
+        await db.insert('plugins', {
+          'plugin_id': manifest.id.isNotEmpty ? manifest.id : pluginId,
+          'entry_path': entryPath,
+          'manifest_json': jsonEncode(manifest.toJson()),
+          'sort_order': nextOrder++,
+        });
+
+        debugPrint('Auto-registered plugin from disk: $pluginId');
+      } catch (e) {
+        debugPrint('Failed to auto-register plugin ($pluginId): $e');
+      }
+    }
+  }
+
+  /// 在插件 ID 目录中查找 manifest.yml（支持直接放在子目录中）
+  Future<File?> _findManifestInPluginDir(Directory pluginIdDir) async {
+    final subEntities = await pluginIdDir.list().toList();
+    for (final sub in subEntities) {
+      if (sub is Directory) {
+        final manifestFile = File(p.join(sub.path, 'manifest.yml'));
+        if (await manifestFile.exists()) {
+          return manifestFile;
+        }
+      }
+      if (sub is File && p.basename(sub.path) == 'manifest.yml') {
+        return sub;
+      }
+    }
+    return null;
+  }
+
+  /// 在插件 ID 目录中查找 entry path（index.html 的相对路径）
+  Future<String?> _findEntryPathInDir(Directory pluginIdDir, String pluginId) async {
+    final subEntities = await pluginIdDir.list().toList();
+    for (final sub in subEntities) {
+      if (sub is Directory) {
+        final subDirName = p.basename(sub.path);
+        final indexFile = File(p.join(sub.path, 'index.html'));
+        if (await indexFile.exists()) {
+          return '$pluginId/$subDirName/index.html';
+        }
+      }
+      if (sub is File && p.basename(sub.path) == 'index.html') {
+        return '$pluginId/index.html';
+      }
+    }
+    return null;
   }
 
   Future<void> _savePlugins() async {
