@@ -10,6 +10,9 @@
 class TrayManager;
 class HotkeyManager;
 
+// Declared in main.cpp - saves window position to persistent file
+void SaveWindowState(HWND hwnd);
+
 // A class abstraction for a high DPI-aware Win32 Window. Intended to be
 // inherited from by classes that wish to specialize with custom
 // rendering and input handling
@@ -36,8 +39,11 @@ class Win32Window {
   // sizes are specified to the OS in physical pixels, hence to ensure a
   // consistent size this function will scale the inputted width and height as
   // as appropriate for the default monitor. The window is invisible until
-  // |Show| is called. Returns true if the window was created successfully.
-  bool Create(const std::wstring& title, const Point& origin, const Size& size);
+  // |Show| is called. If |center| is true, the window is centered on screen.
+  // If |useRawPixels| is true, origin and size are treated as physical pixels
+  // (no DPI scaling applied). Returns true if the window was created successfully.
+  bool Create(const std::wstring& title, const Point& origin, const Size& size,
+              bool center = false, bool useRawPixels = false);
 
   // Show the current window. Returns true if the window was successfully shown.
   bool Show();

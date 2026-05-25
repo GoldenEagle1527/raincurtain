@@ -3,7 +3,6 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import 'plugin_storage_manager.dart';
@@ -126,7 +125,7 @@ class DatabaseManager {
   }
 
   /// 旧数据迁移
-  /// 检测并迁移 JSON 文件和 SharedPreferences 中的旧数据
+  /// 检测并迁移 JSON 文件中的旧数据
   Future<void> _migrateOldData(Directory supportDir) async {
     try {
       bool anyMigrated = false;
@@ -158,12 +157,6 @@ class DatabaseManager {
             debugPrint('Failed to delete old pools data directory: $e');
           }
         }
-      }
-
-      // 3. 迁移 SharedPreferences 中的 saved_plugins
-      final migrated = await _migrateSharedPreferencesPlugins();
-      if (migrated) {
-        anyMigrated = true;
       }
 
       if (anyMigrated) {
@@ -257,52 +250,6 @@ class DatabaseManager {
     }
 
     return migrated;
-  }
-
-  /// 迁移 SharedPreferences 中的 saved_plugins 到数据库
-  Future<bool> _migrateSharedPreferencesPlugins() async {
-    final db = _database!;
-
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final pluginsJson = prefs.getString('saved_plugins');
-      if (pluginsJson == null) return false;
-
-      final List<dynamic> decoded = jsonDecode(pluginsJson);
-      if (decoded.isEmpty) return false;
-
-      final batch = db.batch();
-      for (final e in decoded) {
-        final entryPath = (e['entryPath'] ?? '').toString();
-        if (entryPath.isEmpty) continue;
-
-        final manifest = e['manifest'] as Map<String, dynamic>?;
-        if (manifest == null) continue;
-
-        final pluginId = (manifest['id'] ?? '').toString();
-        if (pluginId.isEmpty) continue;
-
-        batch.insert(
-          'plugins',
-          {
-            'plugin_id': pluginId,
-            'entry_path': entryPath,
-            'manifest_json': jsonEncode(manifest),
-          },
-          conflictAlgorithm: ConflictAlgorithm.replace,
-        );
-      }
-      await batch.commit(noResult: true);
-
-      // 迁移成功后删除旧键
-      await prefs.remove('saved_plugins');
-      debugPrint(
-          'Migrated ${decoded.length} plugins from SharedPreferences');
-      return true;
-    } catch (e) {
-      debugPrint('Failed to migrate SharedPreferences plugins: $e');
-      return false;
-    }
   }
 
   /// 关闭数据库

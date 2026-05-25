@@ -51,4 +51,24 @@ class TabManager extends ChangeNotifier {
     }
     notifyListeners();
   }
+
+  /// 关闭除指定 index 之外的所有可关闭标签页 (保留 home tab)
+  void closeOtherTabs(int keepIndex) {
+    if (keepIndex < 0 || keepIndex >= _tabs.length) return;
+    final keepTab = _tabs[keepIndex];
+    _tabs.removeWhere((t) => t.id != 'home' && t.id != keepTab.id);
+    _currentIndex = _tabs.indexOf(keepTab);
+    if (_currentIndex < 0) _currentIndex = 0;
+    notifyListeners();
+  }
+
+  /// 关闭指定 index 右侧的所有标签页
+  void closeTabsToRight(int index) {
+    if (index < 0 || index >= _tabs.length - 1) return;
+    _tabs.removeRange(index + 1, _tabs.length);
+    if (_currentIndex > index) {
+      _currentIndex = index;
+    }
+    notifyListeners();
+  }
 }

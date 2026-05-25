@@ -124,7 +124,9 @@ Win32Window::~Win32Window() {
 
 bool Win32Window::Create(const std::wstring& title,
                          const Point& origin,
-                         const Size& size) {
+                         const Size& size,
+                         bool center,
+                         bool useRawPixels) {
   Destroy();
 
   const wchar_t* window_class =
@@ -136,10 +138,36 @@ bool Win32Window::Create(const std::wstring& title,
   UINT dpi = FlutterDesktopGetDpiForMonitor(monitor);
   double scale_factor = dpi / 96.0;
 
+  int scaled_width, scaled_height;
+  int pos_x, pos_y;
+
+  if (center) {
+    // 居中：获取主显示器工作区域，计算居中坐标
+    scaled_width = Scale(size.width, scale_factor);
+    scaled_height = Scale(size.height, scale_factor);
+    MONITORINFO mi;
+    mi.cbSize = sizeof(mi);
+    GetMonitorInfo(monitor, &mi);
+    int screen_width = mi.rcWork.right - mi.rcWork.left;
+    int screen_height = mi.rcWork.bottom - mi.rcWork.top;
+    pos_x = mi.rcWork.left + (screen_width - scaled_width) / 2;
+    pos_y = mi.rcWork.top + (screen_height - scaled_height) / 2;
+  } else if (useRawPixels) {
+    // 已经是物理像素坐标，不需要缩放
+    pos_x = static_cast<int>(origin.x);
+    pos_y = static_cast<int>(origin.y);
+    scaled_width = static_cast<int>(size.width);
+    scaled_height = static_cast<int>(size.height);
+  } else {
+    pos_x = Scale(origin.x, scale_factor);
+    pos_y = Scale(origin.y, scale_factor);
+    scaled_width = Scale(size.width, scale_factor);
+    scaled_height = Scale(size.height, scale_factor);
+  }
+
   HWND window = CreateWindow(
       window_class, title.c_str(), WS_OVERLAPPEDWINDOW,
-      Scale(origin.x, scale_factor), Scale(origin.y, scale_factor),
-      Scale(size.width, scale_factor), Scale(size.height, scale_factor),
+      pos_x, pos_y, scaled_width, scaled_height,
       nullptr, nullptr, GetModuleHandle(nullptr), this);
 
   if (!window) {
@@ -182,6 +210,7 @@ Win32Window::MessageHandler(HWND hwnd,
                             LPARAM const lparam) noexcept {
   switch (message) {
     case WM_CLOSE:
+      SaveWindowState(hwnd);
       Hide();
       return 0;
 

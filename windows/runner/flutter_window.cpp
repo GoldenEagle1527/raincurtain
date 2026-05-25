@@ -38,6 +38,7 @@ bool FlutterWindow::OnCreate() {
   });
   
   tray_manager->SetExitAppCallback([this]() {
+    SaveWindowState(GetHandle());
     DestroyWindow(GetHandle());
     PostQuitMessage(0);
   });
@@ -173,6 +174,7 @@ void FlutterWindow::HandleMethodCall(
     result->Success(flutter::EncodableValue(true));
   }
   else if (method == "exitApp") {
+    SaveWindowState(GetHandle());
     DestroyWindow(GetHandle());
     PostQuitMessage(0);
     result->Success(flutter::EncodableValue(true));

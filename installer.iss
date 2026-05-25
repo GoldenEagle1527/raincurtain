@@ -1,5 +1,5 @@
 #define MyAppName "雨幕"
-#define MyAppVersion "1.1.2"
+#define MyAppVersion "1.1.3"
 #define MyAppPublisher "GoldenEaglePersonal"
 #define MyAppExeName "raincurtain.exe"
 #define MyAppSourceDir "build\windows\x64\runner\Release"
@@ -24,6 +24,9 @@ PrivilegesRequired=admin
 PrivilegesRequiredOverridesAllowed=dialog
 ; 根据要求：不要单例检测
 ; AppMutex=
+; 安装前自动关闭正在运行的雨幕进程
+CloseApplications=force
+CloseApplicationsFilter=*.exe
 
 ; VC++ 运行时依赖检测与安装
 [Code]
@@ -44,6 +47,19 @@ begin
   begin
     Result := True; // 需要安装
   end;
+end;
+
+// 安装前强制关闭正在运行的雨幕进程
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  ResultCode: Integer;
+begin
+  Result := '';
+  NeedsRestart := False;
+  // 使用 taskkill 强制终止雨幕进程（忽略错误，因为进程可能未运行）
+  Exec('taskkill.exe', '/F /IM {#MyAppExeName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  // 等待一小段时间确保进程完全退出、文件句柄释放
+  Sleep(500);
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
@@ -99,6 +115,13 @@ Source: "{#MyAppSourceDir}\*.dll"; DestDir: "{app}"; Flags: ignoreversion skipif
 ; 同时复制到安装目录供用户手动安装
 Source: "redist\vc_redist.x64.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall; Check: VCRedistNeedsInstall
 Source: "redist\vc_redist.x64.exe"; DestDir: "{app}"; Flags: ignoreversion; Check: VCRedistNeedsInstall
+
+[InstallDelete]
+; 安装前清理旧文件（可选）
+
+[UninstallRun]
+; 卸载前强制关闭雨幕进程
+Filename: "taskkill.exe"; Parameters: "/F /IM {#MyAppExeName}"; Flags: runhidden; RunOnceId: "KillRainCurtain"
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"

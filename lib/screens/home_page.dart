@@ -273,16 +273,29 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
                       ),
                     ),
                   ),
-                  destinations: tabManager.tabs.map((tab) {
+                  destinations: List.generate(tabManager.tabs.length, (index) {
+                    final tab = tabManager.tabs[index];
+                    final canClose = tab.plugin != null;
                     return NavigationRailDestination(
-                      icon: Icon(tab.plugin == null
-                          ? Icons.store_outlined
-                          : Icons.extension_outlined),
-                      selectedIcon: Icon(
-                          tab.plugin == null ? Icons.store : Icons.extension),
+                      icon: _buildRailTabIcon(
+                        context: context,
+                        tabManager: tabManager,
+                        index: index,
+                        tab: tab,
+                        isSelected: false,
+                        canClose: canClose,
+                      ),
+                      selectedIcon: _buildRailTabIcon(
+                        context: context,
+                        tabManager: tabManager,
+                        index: index,
+                        tab: tab,
+                        isSelected: true,
+                        canClose: canClose,
+                      ),
                       label: Text(_truncateTitle(tab.title, 10)),
                     );
-                  }).toList(),
+                  }),
                 ),
                 // 垂直分割线
                 VerticalDivider(
@@ -558,6 +571,125 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   String _truncateTitle(String title, int maxLength) {
     if (title.length <= maxLength) return title;
     return '${title.substring(0, maxLength)}...';
+  }
+
+  /// 构建平板 NavigationRail 上单个 tab 的图标
+  /// - 选中且可关闭时，右上角叠加一个 close 角标，单击关闭
+  /// - 长按 / 鼠标右键 弹出上下文菜单（关闭 / 关闭其他 / 关闭右侧）
+  /// - 用 Tooltip 提示长按可关闭，提升发现性
+  Widget _buildRailTabIcon({
+    required BuildContext context,
+    required TabManager tabManager,
+    required int index,
+    required TabItem tab,
+    required bool isSelected,
+    required bool canClose,
+  }) {
+    final iconData = tab.plugin == null
+        ? (isSelected ? Icons.store : Icons.store_outlined)
+        : (isSelected ? Icons.extension : Icons.extension_outlined);
+
+    Widget iconWidget = Icon(iconData);
+
+    if (!canClose) {
+      // 不可关闭（home tab）只需要图标本身
+      return iconWidget;
+    }
+
+    // 包一层 GestureDetector 提供长按 / 右键菜单
+    final wrapped = GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onLongPressStart: (details) => _showTabContextMenu(
+        context: context,
+        tabManager: tabManager,
+        index: index,
+        globalPosition: details.globalPosition,
+      ),
+      onSecondaryTapDown: (details) => _showTabContextMenu(
+        context: context,
+        tabManager: tabManager,
+        index: index,
+        globalPosition: details.globalPosition,
+      ),
+      child: iconWidget,
+    );
+
+    return Tooltip(
+      message: '长按 / 右键 可关闭',
+      waitDuration: const Duration(milliseconds: 600),
+      child: wrapped,
+    );
+  }
+
+  /// 弹出 tab 上下文菜单
+  Future<void> _showTabContextMenu({
+    required BuildContext context,
+    required TabManager tabManager,
+    required int index,
+    required Offset globalPosition,
+  }) async {
+    final overlay =
+        Overlay.of(context).context.findRenderObject() as RenderBox?;
+    if (overlay == null) return;
+
+    final hasRight = index < tabManager.tabs.length - 1;
+    // 是否存在其他可关闭的 tab
+    final hasOthers = tabManager.tabs
+        .asMap()
+        .entries
+        .any((e) => e.key != index && e.value.plugin != null);
+
+    final selected = await showMenu<String>(
+      context: context,
+      position: RelativeRect.fromRect(
+        Rect.fromLTWH(globalPosition.dx, globalPosition.dy, 0, 0),
+        Offset.zero & overlay.size,
+      ),
+      items: [
+        const PopupMenuItem<String>(
+          value: 'close',
+          child: ListTile(
+            dense: true,
+            contentPadding: EdgeInsets.zero,
+            leading: Icon(Icons.close),
+            title: Text('关闭标签页'),
+          ),
+        ),
+        if (hasOthers)
+          const PopupMenuItem<String>(
+            value: 'close_others',
+            child: ListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(Icons.clear_all),
+              title: Text('关闭其他标签页'),
+            ),
+          ),
+        if (hasRight)
+          const PopupMenuItem<String>(
+            value: 'close_right',
+            child: ListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(Icons.last_page),
+              title: Text('关闭右侧所有'),
+            ),
+          ),
+      ],
+    );
+
+    if (selected == null) return;
+    switch (selected) {
+      case 'close':
+        tabManager.closeTab(index);
+        break;
+      case 'close_others':
+        tabManager.closeOtherTabs(index);
+        break;
+      case 'close_right':
+        tabManager.closeTabsToRight(index);
+        break;
+    }
   }
 
   /// 显示创建池对话框
