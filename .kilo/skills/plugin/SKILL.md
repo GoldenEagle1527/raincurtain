@@ -107,6 +107,12 @@ const batch = await RainCurtain.dns.resolveAll(
   ],
   { concurrency: 3 },
 );
+
+// 屏幕方向控制（仅旋转 WebView，App 壳体不变）
+await RainCurtain.orientation.lock("landscape"); // 横屏
+await RainCurtain.orientation.lock("portrait");  // 竖屏
+await RainCurtain.orientation.unlock();           // 恢复默认
+const info = await RainCurtain.orientation.get(); // { mode, locked }
 ```
 
 ## 输入/输出处理

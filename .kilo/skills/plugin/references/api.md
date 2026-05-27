@@ -888,3 +888,73 @@ window.flutter_inappwebview.callHandler("handlerName", data);
 - 通知 (`new Notification()`)
 - 文件系统访问 (`window.showOpenFilePicker()` / `window.showSaveFilePicker()` / `window.showDirectoryPicker()`) — 已由系统透明代理，直接使用标准 API 即可，两个平台行为一致
 - USB、串口、MIDI、传感器、字体枚举
+
+---
+
+## 屏幕方向控制
+
+插件可以通过 `RainCurtain.orientation` API 控制屏幕方向。调用后 **Android 系统真正旋转屏幕**（状态栏、键盘、输入法等全部跟随），属于系统级旋转。此 API 仅在插件页面生效，插件页面关闭时自动恢复为自由旋转。Windows 平台调用无副作用。
+
+### 切换为横屏
+
+```javascript
+// 系统级横屏：状态栏到侧边，键盘横向弹出
+const result = await RainCurtain.orientation.lock('landscape');
+// result = { success: true }
+```
+
+### 恢复竖屏
+
+```javascript
+// 锁定为竖屏
+const result = await RainCurtain.orientation.lock('portrait');
+
+// 或解锁为自由旋转（跟随系统自动旋转设置）
+const result = await RainCurtain.orientation.unlock();
+// result = { success: true }
+```
+
+### 查询当前状态
+
+```javascript
+const info = await RainCurtain.orientation.get();
+// 横屏锁定时:
+// info = { mode: 'landscape', locked: true }
+
+// 未锁定时（默认）:
+// info = { mode: 'portrait', locked: false }
+```
+
+### 错误处理
+
+```javascript
+const result = await RainCurtain.orientation.lock('invalid');
+if (!result.success) {
+  console.error(result.error);
+  // "mode must be 'landscape' or 'portrait'"
+}
+```
+
+### 完整示例：视频播放器横屏
+
+```javascript
+// 进入全屏播放时横屏
+async function enterFullscreen() {
+  await RainCurtain.orientation.lock('landscape');
+  document.querySelector('.video-player').classList.add('fullscreen');
+}
+
+// 退出全屏时恢复
+async function exitFullscreen() {
+  await RainCurtain.orientation.unlock();
+  document.querySelector('.video-player').classList.remove('fullscreen');
+}
+```
+
+### 注意事项
+
+- **系统级旋转**：通过 `SystemChrome.setPreferredOrientations` 实现，Android 系统真正切换屏幕方向，键盘、输入法、状态栏等全部跟随旋转
+- **插件级生效**：方向锁定仅在当前插件页面有效，插件页面关闭（dispose）时自动恢复为自由旋转
+- **Windows 兼容**：Windows 平台调用 API 返回 success 但无视觉效果（桌面端无旋转概念）
+- **两种模式**：`'landscape'`（横屏，含左旋和右旋）和 `'portrait'`（竖屏，含正向和反向）
+- **`unlock()` vs `lock('portrait')`**：`unlock()` 恢复为自由旋转（跟随系统自动旋转设置），`lock('portrait')` 强制锁定竖屏（禁止旋转到横屏）

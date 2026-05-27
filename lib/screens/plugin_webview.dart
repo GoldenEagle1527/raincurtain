@@ -17,6 +17,7 @@ import 'plugin_webview/raincurtain_api_handler.dart';
 import 'plugin_webview/ws_handler.dart';
 import 'plugin_webview/udp_handler.dart';
 import 'plugin_webview/dns_handler.dart';
+import 'plugin_webview/orientation_handler.dart';
 
 /// 插件 WebView 视图
 /// 加载并显示插件的 Web 内容
@@ -47,7 +48,8 @@ class PluginWebViewState extends State<PluginWebView>
          RainCurtainApiMixin,
          WebSocketMixin,
          UdpMixin,
-         DnsMixin {
+         DnsMixin,
+         OrientationMixin {
   @override
   bool get wantKeepAlive => true;
 
@@ -89,6 +91,8 @@ class PluginWebViewState extends State<PluginWebView>
     disposeUdp();
     // 释放 DNS 管理器
     disposeDns();
+    // 恢复屏幕方向（如果插件锁定了方向）
+    disposeOrientation();
     // 释放 WebView 控制器引用
     webViewController = null;
     super.dispose();
@@ -175,6 +179,11 @@ class PluginWebViewState extends State<PluginWebView>
               source: DnsMixin.polyfillJS,
               injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
             ),
+            // 注入屏幕方向控制 API 脚本（RainCurtain.orientation）
+            UserScript(
+              source: OrientationMixin.polyfillJS,
+              injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
+            ),
             // Windows 平台注入滚动修复脚本，解决 WebView2 滚轮事件问题
             if (Platform.isWindows)
               UserScript(
@@ -237,6 +246,7 @@ class PluginWebViewState extends State<PluginWebView>
             registerWsHandlers(controller);
             registerUdpHandlers(controller);
             registerDnsHandlers(controller);
+            registerOrientationHandlers(controller);
           },
           // 拦截下载请求
           onDownloadStartRequest: (controller, downloadRequest) async {

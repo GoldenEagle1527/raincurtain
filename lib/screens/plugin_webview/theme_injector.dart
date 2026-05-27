@@ -12,6 +12,7 @@ String generateThemeJS(ThemeData theme) {
   final colorScheme = theme.colorScheme;
   final isLight = theme.brightness == Brightness.light;
   final successColor = isLight ? '#2E7D32' : '#81C784';
+  final errorColor = isLight ? _toHex(colorScheme.error) : '#B44A4A';
   final elevation = isLight
       ? '0 1px 2px rgba(0,0,0,.3), 0 1px 3px 1px rgba(0,0,0,.15)'
       : '0 1px 2px rgba(0,0,0,.6), 0 1px 3px 1px rgba(0,0,0,.4)';
@@ -101,7 +102,7 @@ String generateThemeJS(ThemeData theme) {
       --md-on-surface: ${_toHex(colorScheme.onSurface)};
       --md-on-surface-variant: ${_toHex(colorScheme.onSurfaceVariant)};
       --md-outline-variant: ${_toHex(colorScheme.outlineVariant)};
-      --md-error: ${_toHex(colorScheme.error)};
+      --md-error: $errorColor;
       --md-success: $successColor;
 
       --md-radius-button: 20px;
