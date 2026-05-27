@@ -186,32 +186,51 @@ class _MarketViewState extends State<MarketView> {
     );
   }
 
-  /// 构建插件网格（一行3列）
+  /// 构建插件网格
+  /// 桌面端：3列，宽高比 2:1 的极客风横向卡片
+  /// 手机端：单列纵向排列
   Widget _buildPluginGrid(
     BuildContext context,
     List<LocalPlugin> plugins,
     PluginManager pluginManager,
   ) {
     final colorScheme = Theme.of(context).colorScheme;
+    final isCompact = ResponsiveHelper.isCompact(context);
 
+    if (isCompact) {
+      // 手机端：单列列表
+      return ListView.separated(
+        padding: const EdgeInsets.only(bottom: 16),
+        itemCount: plugins.length,
+        separatorBuilder: (_, __) => const SizedBox(height: 8),
+        itemBuilder: (context, index) {
+          final plugin = plugins[index];
+          return _buildCompactCard(context, plugin, pluginManager, colorScheme);
+        },
+      );
+    }
+
+    // 桌面端：3列网格，宽高比 2:1
     return GridView.builder(
       padding: const EdgeInsets.only(bottom: 16),
       gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
         crossAxisCount: 3,
         crossAxisSpacing: 12,
         mainAxisSpacing: 12,
-        childAspectRatio: 1.2,
+        childAspectRatio: 2.0,
       ),
       itemCount: plugins.length,
       itemBuilder: (context, index) {
         final plugin = plugins[index];
-        return _buildPluginCard(context, plugin, pluginManager, colorScheme);
+        return _buildDesktopCard(context, plugin, pluginManager, colorScheme);
       },
     );
   }
 
-  /// 构建插件卡片（适配网格布局）
-  Widget _buildPluginCard(
+  /// 桌面端卡片：紧凑极客风，首字下沉式布局
+  /// 左上角大图标如同段落首字母，文字紧贴环绕
+  /// 右上角关闭按钮
+  Widget _buildDesktopCard(
     BuildContext context,
     LocalPlugin plugin,
     PluginManager pluginManager,
@@ -219,74 +238,165 @@ class _MarketViewState extends State<MarketView> {
   ) {
     return Card(
       clipBehavior: Clip.antiAlias,
+      elevation: 0,
+      margin: EdgeInsets.zero,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(8),
+        side: BorderSide(
+          color: colorScheme.outlineVariant.withValues(alpha: 0.4),
+        ),
+      ),
+      child: InkWell(
+        onTap: () {
+          Provider.of<TabManager>(context, listen: false).openOrSwitchTab(plugin);
+        },
+        child: Stack(
+          children: [
+            Padding(
+              padding: const EdgeInsets.all(10),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // 首字下沉式：图标在左上，名称紧挨图标右侧（第一行）
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      // 图标作为"首字"
+                      PluginIconWidget(plugin: plugin),
+                      const SizedBox(width: 8),
+                      // 名称 + 描述紧贴图标
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              plugin.name,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                                fontWeight: FontWeight.w700,
+                                color: colorScheme.onSurface,
+                                height: 1.2,
+                              ),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              plugin.description,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                                color: colorScheme.onSurfaceVariant,
+                                height: 1.3,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                  const Spacer(),
+                  // 底部元信息，紧贴底边
+                  Text(
+                    'v${plugin.version} · ${plugin.author}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                      color: colorScheme.onSurfaceVariant.withValues(alpha: 0.6),
+                      height: 1.0,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            // 右上角关闭按钮
+            Positioned(
+              top: 4,
+              right: 4,
+              child: SizedBox(
+                width: 24,
+                height: 24,
+                child: IconButton(
+                  icon: const Icon(Icons.close, size: 14),
+                  color: colorScheme.onSurfaceVariant,
+                  padding: EdgeInsets.zero,
+                  onPressed: () => _showUninstallDialog(context, plugin, pluginManager),
+                  tooltip: '卸载',
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 手机端卡片：单行紧凑显示，同样首字下沉风格
+  Widget _buildCompactCard(
+    BuildContext context,
+    LocalPlugin plugin,
+    PluginManager pluginManager,
+    ColorScheme colorScheme,
+  ) {
+    return Card(
+      clipBehavior: Clip.antiAlias,
+      elevation: 0,
+      margin: EdgeInsets.zero,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(8),
+        side: BorderSide(
+          color: colorScheme.outlineVariant.withValues(alpha: 0.4),
+        ),
+      ),
       child: InkWell(
         onTap: () {
           Provider.of<TabManager>(context, listen: false).openOrSwitchTab(plugin);
         },
         child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+          padding: const EdgeInsets.all(10),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-              // 顶部：图标 + 卸载按钮
-              Row(
-                children: [
-                  PluginIconWidget(plugin: plugin),
-                  const Spacer(),
-                  SizedBox(
-                    width: 32,
-                    height: 32,
-                    child: IconButton(
-                      icon: const Icon(Icons.delete_outline, size: 18),
-                      color: colorScheme.error,
-                      padding: EdgeInsets.zero,
-                      onPressed: () => _showUninstallDialog(context, plugin, pluginManager),
-                      tooltip: '卸载',
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 12),
-              // 插件名称
-              Text(
-                plugin.name,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                  fontWeight: FontWeight.w600,
-                  color: colorScheme.onSurface,
-                ),
-              ),
-              const SizedBox(height: 4),
-              // 插件描述
+              PluginIconWidget(plugin: plugin),
+              const SizedBox(width: 10),
               Expanded(
-                child: Text(
-                  plugin.description,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: colorScheme.onSurfaceVariant,
-                  ),
-                ),
-              ),
-              // 底部：版本 + 作者
-              Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      'v${plugin.version}',
-                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                        color: colorScheme.onSurfaceVariant.withValues(alpha: 0.8),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      plugin.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                        fontWeight: FontWeight.w700,
+                        color: colorScheme.onSurface,
+                        height: 1.2,
                       ),
                     ),
-                  ),
-                  Text(
-                    plugin.author,
-                    style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                      color: colorScheme.onSurfaceVariant.withValues(alpha: 0.8),
+                    const SizedBox(height: 2),
+                    Text(
+                      plugin.description,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: colorScheme.onSurfaceVariant,
+                        height: 1.2,
+                      ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
+              ),
+              const SizedBox(width: 4),
+              SizedBox(
+                width: 24,
+                height: 24,
+                child: IconButton(
+                  icon: const Icon(Icons.close, size: 14),
+                  color: colorScheme.onSurfaceVariant,
+                  padding: EdgeInsets.zero,
+                  onPressed: () => _showUninstallDialog(context, plugin, pluginManager),
+                  tooltip: '卸载',
+                ),
               ),
             ],
           ),
@@ -321,17 +431,28 @@ class _MarketViewState extends State<MarketView> {
           ),
           // 卸载按钮
           FilledButton(
-            onPressed: () {
-              pluginManager.uninstallPlugin(plugin.id);
+            onPressed: () async {
               Navigator.pop(context);
-
-              // 显示成功提示
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(
-                  content: Text('已卸载 ${plugin.name}'),
-                  backgroundColor: colorScheme.primary,
-                ),
-              );
+              try {
+                await pluginManager.uninstallPlugin(plugin.id);
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text('已卸载 ${plugin.name}'),
+                      backgroundColor: colorScheme.primary,
+                    ),
+                  );
+                }
+              } catch (e) {
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text('卸载失败: $e'),
+                      backgroundColor: colorScheme.error,
+                    ),
+                  );
+                }
+              }
             },
             style: FilledButton.styleFrom(
               backgroundColor: colorScheme.error,

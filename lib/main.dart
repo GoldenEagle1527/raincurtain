@@ -16,12 +16,16 @@ import 'widgets/rain_background.dart';
 import 'utils/material_icons_registry.dart';
 
 import 'sandbox_server.dart';
+import 'plugin_api_server.dart';
 
 // 用于承载插件沙盒文件的本地 HTTP 服务器静态实例
 SandboxServer? localhostServer;
 
 // 沙盒服务器实际监听端口（start() 成功后由系统自动分配）
 int sandboxServerPort = 0;
+
+// 插件管理 API 服务器实例
+PluginApiServer? pluginApiServer;
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -89,6 +93,16 @@ class _RainCurtainAppState extends State<RainCurtainApp> {
           );
           await localhostServer!.start();
           sandboxServerPort = localhostServer!.actualPort;
+
+          // 启动插件管理 API 服务器
+          pluginApiServer = PluginApiServer(pm);
+          final apiStarted = await pluginApiServer!.start();
+          if (apiStarted) {
+            debugPrint('Plugin API Server started at http://127.0.0.1:${PluginApiServer.kPort}');
+          } else {
+            debugPrint('Plugin API Server failed to start (port in use?), external tools will be unavailable');
+          }
+
           if (mounted) {
             setState(() {
               _serverStarted = true;
@@ -105,6 +119,7 @@ class _RainCurtainAppState extends State<RainCurtainApp> {
   @override
   void dispose() {
     localhostServer?.close();
+    pluginApiServer?.close();
     super.dispose();
   }
 

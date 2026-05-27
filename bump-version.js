@@ -8,7 +8,7 @@ const fs = require("fs");
 const path = require("path");
 
 // ★★★ 在这里修改版本号 ★★★
-const VERSION = "1.1.3";
+const VERSION = "1.1.4";
 const BUILD = 2; // pubspec.yaml 的 build number (+N)
 
 // ========================================
@@ -60,6 +60,10 @@ patchFile("windows/runner/Runner.rc", [
 
 patchFile("tools/electron-app/package.json", [
   [/("version"\s*:\s*")\S+(")/, `$1${V}$2`],
+]);
+
+patchFile("lib/plugin_api_server.dart", [
+  [/(static const String kAppVersion = ')\S+(';)/, `$1${V}+${BUILD}$2`],
 ]);
 
 console.log("\n完成!");

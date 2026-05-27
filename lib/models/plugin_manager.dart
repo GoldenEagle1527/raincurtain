@@ -243,19 +243,22 @@ class PluginManager extends ChangeNotifier {
     });
   }
 
-  Future<void> installPlugin({
-    Future<bool> Function(LocalPlugin existingPlugin, PluginManifest newManifest)? onConflict,
-  }) async {
-    final result = await FilePicker.pickFiles(
-      type: FileType.custom,
-      allowedExtensions: ['zip'],
-    );
-
-    if (result == null || result.files.single.path == null) {
-      return;
+  /// 根据 pluginId 查找已加载的插件
+  LocalPlugin? getPluginById(String pluginId) {
+    for (final p in _plugins) {
+      if (p.id == pluginId) return p;
     }
+    return null;
+  }
 
-    final zipFile = File(result.files.single.path!);
+  /// 从 zip 文件路径安装插件（无 UI 依赖，供 API 和 UI 共用）
+  ///
+  /// [overwrite] 为 true 时覆盖已存在的同 ID 插件，为 false 时抛异常。
+  /// 返回安装成功的 [LocalPlugin]。
+  Future<LocalPlugin> installPluginFromZip(
+    File zipFile, {
+    required bool overwrite,
+  }) async {
     final bytes = await zipFile.readAsBytes();
     final archive = ZipDecoder().decodeBytes(bytes);
 
@@ -282,35 +285,21 @@ class PluginManager extends ChangeNotifier {
 
       final manifest = await _readManifest(manifestFile);
       final pluginId = manifest.id;
-      
+
       // 检查是否已存在
-      final existingPlugin = _plugins.cast<LocalPlugin?>().firstWhere(
-        (p) => p?.id == pluginId,
-        orElse: () => null,
-      );
-      
+      final existingPlugin = getPluginById(pluginId);
+
       if (existingPlugin != null) {
-        // 如果提供了冲突处理回调，调用它
-        if (onConflict != null) {
-          final shouldOverwrite = await onConflict(existingPlugin, manifest);
-          if (!shouldOverwrite) {
-            // 用户取消，清理临时目录
-            if (await tempDir.exists()) {
-              await tempDir.delete(recursive: true);
-            }
-            return;
-          }
-        } else {
-          // 没有提供回调，默认抛出异常
+        if (!overwrite) {
           throw Exception('插件已存在：$pluginId');
         }
-        
+
         // 删除旧插件目录
         final oldPluginDir = Directory(p.join(sandboxDir.path, pluginId));
         if (await oldPluginDir.exists()) {
           await oldPluginDir.delete(recursive: true);
         }
-        
+
         // 从列表中移除旧插件
         _plugins.removeWhere((p) => p.id == pluginId);
       }
@@ -335,12 +324,156 @@ class PluginManager extends ChangeNotifier {
       }
 
       notifyListeners();
+      return newPlugin;
     } catch (_) {
       if (await tempDir.exists()) {
         await tempDir.delete(recursive: true);
       }
       rethrow;
     }
+  }
+
+  /// 注册一个已存在于沙箱目录的插件（开发模式）
+  ///
+  /// 插件目录（或符号链接）必须已存在于 sandboxDir/{pluginId}/ 下。
+  /// [entryPath] 格式为 "{pluginId}/{subdir}/index.html"。
+  /// [overwrite] 为 true 时覆盖已存在的同 ID 插件。
+  /// 返回注册成功的 [LocalPlugin]。
+  Future<LocalPlugin> registerExistingPlugin({
+    required String pluginId,
+    required String entryPath,
+    required bool overwrite,
+  }) async {
+    // 校验 entryPath 对应的文件存在
+    final entryFile = File(p.join(sandboxDir.path, entryPath));
+    if (!await entryFile.exists()) {
+      throw Exception('入口文件不存在：$entryPath');
+    }
+
+    // 查找 manifest.yml（与 index.html 同目录）
+    final manifestFile = File(p.join(entryFile.parent.path, 'manifest.yml'));
+    if (!await manifestFile.exists()) {
+      throw Exception('manifest.yml 不存在于入口文件同级目录');
+    }
+
+    final manifest = await _readManifest(manifestFile);
+
+    // 校验 pluginId 与 manifest.id 一致
+    if (manifest.id != pluginId) {
+      throw Exception(
+          'pluginId ($pluginId) 与 manifest.id (${manifest.id}) 不一致');
+    }
+
+    // 检查是否已存在
+    final existingPlugin = getPluginById(pluginId);
+    if (existingPlugin != null) {
+      if (!overwrite) {
+        throw Exception('插件已存在：$pluginId');
+      }
+      _plugins.removeWhere((p) => p.id == pluginId);
+    }
+
+    final newPlugin = LocalPlugin(
+      entryPath: entryPath,
+      manifest: manifest,
+    );
+
+    _plugins.add(newPlugin);
+    await _savePlugins();
+
+    // 创建插件的存储表
+    if (manifest.storage.isNotEmpty) {
+      await PluginStorageManager.instance.ensureTablesForPlugin(
+          manifest.id, manifest.storage);
+    }
+
+    notifyListeners();
+    return newPlugin;
+  }
+
+  /// 重新读取单个插件的 manifest.yml（开发模式热更新）
+  ///
+  /// 返回更新后的 [LocalPlugin]，如果插件不存在返回 null。
+  Future<LocalPlugin?> reloadPlugin(String pluginId) async {
+    final idx = _plugins.indexWhere((p) => p.id == pluginId);
+    if (idx == -1) return null;
+
+    final oldPlugin = _plugins[idx];
+    final entryFile = File(p.join(sandboxDir.path, oldPlugin.entryPath));
+    final manifestFile = File(p.join(entryFile.parent.path, 'manifest.yml'));
+
+    if (!await manifestFile.exists()) {
+      throw Exception('manifest.yml 不存在：${oldPlugin.entryPath}');
+    }
+
+    final manifest = await _readManifest(manifestFile);
+    final updatedPlugin = LocalPlugin(
+      entryPath: oldPlugin.entryPath,
+      manifest: manifest,
+    );
+
+    _plugins[idx] = updatedPlugin;
+    await _savePlugins();
+
+    // 确保存储表同步
+    if (manifest.storage.isNotEmpty) {
+      await PluginStorageManager.instance.ensureTablesForPlugin(
+          manifest.id, manifest.storage);
+    }
+
+    notifyListeners();
+    return updatedPlugin;
+  }
+
+  Future<void> installPlugin({
+    Future<bool> Function(LocalPlugin existingPlugin, PluginManifest newManifest)? onConflict,
+  }) async {
+    final result = await FilePicker.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: ['zip'],
+    );
+
+    if (result == null || result.files.single.path == null) {
+      return;
+    }
+
+    final zipFile = File(result.files.single.path!);
+
+    // 检查是否已存在同 ID 的插件（只从 archive 中读 manifest，不全量解压）
+    if (onConflict != null) {
+      final manifest = await _readManifestFromZip(zipFile);
+      if (manifest != null) {
+        final existingPlugin = getPluginById(manifest.id);
+        if (existingPlugin != null) {
+          final shouldOverwrite = await onConflict(existingPlugin, manifest);
+          if (!shouldOverwrite) {
+            return;
+          }
+        }
+      }
+    }
+
+    await installPluginFromZip(zipFile, overwrite: true);
+  }
+
+  /// 从 zip 文件中直接读取 manifest.yml（不解压全部文件到磁盘）
+  Future<PluginManifest?> _readManifestFromZip(File zipFile) async {
+    final bytes = await zipFile.readAsBytes();
+    final archive = ZipDecoder().decodeBytes(bytes);
+
+    for (final file in archive) {
+      if (file.isFile && p.basename(file.name) == 'manifest.yml') {
+        try {
+          final content = utf8.decode(file.content as List<int>);
+          final yaml = loadYaml(content);
+          if (yaml is! YamlMap) continue;
+          return PluginManifest.fromYamlMap(yaml);
+        } catch (_) {
+          continue;
+        }
+      }
+    }
+    return null;
   }
 
   Future<File?> _findManifestFile(Directory pluginDir) async {
