@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import '../models/plugin_manager.dart';
+import '../models/console_manager.dart';
 import '../main.dart' show sandboxServerPort;
 
 // 子模块导入
@@ -18,6 +19,7 @@ import 'plugin_webview/ws_handler.dart';
 import 'plugin_webview/udp_handler.dart';
 import 'plugin_webview/dns_handler.dart';
 import 'plugin_webview/orientation_handler.dart';
+import '../utils/permission_utils.dart';
 
 /// 插件 WebView 视图
 /// 加载并显示插件的 Web 内容
@@ -59,6 +61,9 @@ class PluginWebViewState extends State<PluginWebView>
   String? errorMessage;
   ThemeData? _currentTheme;
 
+  /// 控制台日志管理器，用于捕获 WebView 的 console 输出
+  final ConsoleManager consoleManager = ConsoleManager();
+
   @override
   void initState() {
     super.initState();
@@ -95,6 +100,8 @@ class PluginWebViewState extends State<PluginWebView>
     disposeOrientation();
     // 释放 WebView 控制器引用
     webViewController = null;
+    // 释放控制台管理器
+    consoleManager.dispose();
     super.dispose();
   }
 
@@ -116,9 +123,22 @@ class PluginWebViewState extends State<PluginWebView>
     return false;
   }
 
-  /// 打开 DevTools 调试控制台（供外部调用）
-  void openDevTools() {
-    webViewController?.openDevTools();
+  /// 将 InAppWebView 的 ConsoleMessageLevel 映射到 ConsoleLevel
+  ConsoleLevel _mapConsoleLevel(ConsoleMessageLevel level) {
+    switch (level) {
+      case ConsoleMessageLevel.LOG:
+        return ConsoleLevel.log;
+      case ConsoleMessageLevel.WARNING:
+        return ConsoleLevel.warn;
+      case ConsoleMessageLevel.ERROR:
+        return ConsoleLevel.error;
+      case ConsoleMessageLevel.DEBUG:
+        return ConsoleLevel.debug;
+      case ConsoleMessageLevel.TIP:
+        return ConsoleLevel.info;
+      default:
+        return ConsoleLevel.log;
+    }
   }
 
   @override
@@ -217,11 +237,42 @@ class PluginWebViewState extends State<PluginWebView>
             // 数据库存储
             databaseEnabled: true,
           ),
-          // Android: 当网页请求麦克风/摄像头/地理位置等权限时，直接授权
+          // Android: 当网页请求麦克风/摄像头等权限时，按需请求原生权限
           onPermissionRequest: (controller, request) async {
+            if (!Platform.isAndroid) {
+              // 非 Android 平台直接放行
+              return PermissionResponse(
+                resources: request.resources,
+                action: PermissionResponseAction.GRANT,
+              );
+            }
+
+            final grantedResources =
+                await PermissionUtils.requestForWebViewResources(
+              request.resources,
+            );
+
+            if (grantedResources.isEmpty) {
+              return PermissionResponse(
+                resources: request.resources,
+                action: PermissionResponseAction.DENY,
+              );
+            }
+
             return PermissionResponse(
-              resources: request.resources,
+              resources: grantedResources,
               action: PermissionResponseAction.GRANT,
+            );
+          },
+          // Android: 当网页请求地理位置时，按需请求位置权限
+          onGeolocationPermissionsShowPrompt:
+              (controller, origin) async {
+            final granted =
+                await PermissionUtils.requestLocationPermission();
+            return GeolocationPermissionShowPromptResponse(
+              origin: origin,
+              allow: granted,
+              retain: granted,
             );
           },
           onWebViewCreated: (controller) {
@@ -295,6 +346,13 @@ class PluginWebViewState extends State<PluginWebView>
           },
           onReceivedHttpError: (controller, request, errorResponse) {
             // 忽略 404 等由于页面资源未找到导致的错误
+          },
+          // 拦截 WebView 中的 console.* 输出，转发到 ConsoleManager
+          onConsoleMessage: (controller, consoleMessage) {
+            consoleManager.addMessage(
+              _mapConsoleLevel(consoleMessage.messageLevel),
+              consoleMessage.message,
+            );
           },
         ),
         // 进度条

@@ -1,4 +1,3 @@
-import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../models/plugin_manager.dart';
@@ -9,6 +8,7 @@ import '../utils/responsive_helper.dart';
 import '../widgets/theme_toggle_button.dart';
 import '../widgets/closeable_tab.dart';
 import '../widgets/plugin_overwrite_dialog.dart';
+import '../widgets/console_panel.dart';
 import 'market_view.dart';
 import 'plugin_webview.dart';
 import 'settings_page.dart';
@@ -28,7 +28,7 @@ class HomePage extends StatefulWidget {
 
 class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   TabController? _tabController;
-  /// 每个 tab index 对应的 PluginWebView GlobalKey，用于调用 openDevTools
+  /// 每个 tab index 对应的 PluginWebView GlobalKey，用于访问 consoleManager
   final Map<int, GlobalKey<PluginWebViewState>> _webViewKeys = {};
   
   /// 缓存标签页组件实例，以 TabItem.id 为键，避免切换时重载
@@ -45,46 +45,16 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     return _webViewKeys.putIfAbsent(index, () => GlobalKey<PluginWebViewState>());
   }
 
-  /// 打开当前插件 tab 的 DevTools
-  void _openCurrentDevTools() {
-    // Android 平台不支持 openDevTools()，引导用户使用 Chrome 远程调试
-    if (Platform.isAndroid) {
-      showDialog(
-        context: context,
-        builder: (context) => AlertDialog(
-          icon: const Icon(Icons.bug_report_outlined),
-          title: const Text('开发者调试'),
-          content: const Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text('Android WebView 不支持直接打开 DevTools。\n\n请通过以下步骤使用 Chrome 远程调试：'),
-              SizedBox(height: 12),
-              Text('1. 用 USB 连接手机到电脑'),
-              Text('2. 开启手机的 USB 调试'),
-              Text('3. 在电脑 Chrome 浏览器中访问：'),
-              SizedBox(height: 4),
-              SelectableText(
-                'chrome://inspect/#devices',
-                style: TextStyle(fontFamily: 'monospace', fontSize: 13),
-              ),
-              SizedBox(height: 4),
-              Text('4. 在列表中找到对应 WebView 并点击 inspect'),
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('知道了'),
-            ),
-          ],
-        ),
-      );
-      return;
-    }
+  /// 切换当前插件 tab 的控制台面板显隐
+  void _toggleConsole() {
     final tabManager = context.read<TabManager>();
     final index = tabManager.currentIndex;
-    _webViewKeys[index]?.currentState?.openDevTools();
+    final state = _webViewKeys[index]?.currentState;
+    if (state != null) {
+      setState(() {
+        state.consoleManager.toggleVisibility();
+      });
+    }
   }
   
   /// 获取或创建 TabController
@@ -175,9 +145,9 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
         actions: [
           if (!isStreamMode && isPlugin)
             IconButton(
-              icon: const Icon(Icons.bug_report_outlined),
-              tooltip: '打开开发者控制台',
-              onPressed: _openCurrentDevTools,
+              icon: const Icon(Icons.terminal),
+              tooltip: '控制台',
+              onPressed: _toggleConsole,
             ),
           IconButton(
             icon: const Icon(Icons.settings),
@@ -237,9 +207,9 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
         actions: [
           if (!isStreamMode && isPlugin)
             IconButton(
-              icon: const Icon(Icons.bug_report_outlined),
-              tooltip: '打开开发者控制台',
-              onPressed: _openCurrentDevTools,
+              icon: const Icon(Icons.terminal),
+              tooltip: '控制台',
+              onPressed: _toggleConsole,
             ),
           IconButton(
             icon: const Icon(Icons.settings),
@@ -350,9 +320,9 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
         actions: [
           if (!isStreamMode && isPlugin)
             IconButton(
-              icon: const Icon(Icons.bug_report_outlined),
-              tooltip: '打开开发者控制台',
-              onPressed: _openCurrentDevTools,
+              icon: const Icon(Icons.terminal),
+              tooltip: '控制台',
+              onPressed: _toggleConsole,
             ),
           if (isStreamMode)
             IconButton(
@@ -462,14 +432,14 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
           ),
           // 分割线
           const Divider(),
-          // 打开开发者控制台（仅当前 tab 是插件时显示）
+          // 打开控制台（仅当前 tab 是插件时显示）
           if (tabManager.currentTab.plugin != null)
             ListTile(
-              leading: const Icon(Icons.bug_report_outlined),
-              title: const Text('打开开发者控制台'),
+              leading: const Icon(Icons.terminal),
+              title: const Text('控制台'),
               onTap: () {
                 Navigator.pop(context);
-                _openCurrentDevTools();
+                _toggleConsole();
               },
             ),
           // 主题切换分段按钮
@@ -511,9 +481,37 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       children.add(cachedWidget);
     }
 
-    return IndexedStack(
-      index: tabManager.currentIndex,
-      children: children,
+    // 获取当前插件 tab 的 ConsoleManager（如果有的话）
+    final currentIndex = tabManager.currentIndex;
+    final currentState = _webViewKeys[currentIndex]?.currentState;
+    final consoleManager = currentState?.consoleManager;
+    final isConsoleVisible = consoleManager?.isVisible ?? false;
+
+    return Stack(
+      children: [
+        // 主内容：标签页切换
+        IndexedStack(
+          index: currentIndex,
+          children: children,
+        ),
+        // 悬浮控制台面板
+        if (isConsoleVisible && consoleManager != null)
+          Positioned(
+            left: 0,
+            right: 0,
+            bottom: 0,
+            height: MediaQuery.of(context).size.height * 0.4,
+            child: ConsolePanel(
+              consoleManager: consoleManager,
+              webViewController: currentState?.webViewController,
+              onClose: () {
+                setState(() {
+                  consoleManager.hide();
+                });
+              },
+            ),
+          ),
+      ],
     );
   }
   

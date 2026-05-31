@@ -7,6 +7,7 @@ import 'package:http/http.dart' as http;
 import 'package:http_parser/http_parser.dart' as http_parser;
 import 'package:path_provider/path_provider.dart';
 import '../../main.dart' show sandboxServerPort;
+import '../../utils/permission_utils.dart';
 import 'fetch_cache.dart';
 
 /// Fetch/XHR 网络请求相关的 JS polyfill 和 Handler 注册
@@ -572,9 +573,13 @@ mixin FetchMixin {
       // 确定保存目录：优先使用外部存储 Downloads，回退到应用文档目录
       Directory saveDir;
       if (Platform.isAndroid) {
+        // 按需请求存储权限（Android 13+ 自动处理，不会弹窗）
+        final hasStorage = await PermissionUtils.requestStoragePermission();
+
         // Android 外部存储 Downloads 目录
         saveDir = Directory('/storage/emulated/0/Download');
-        if (!await saveDir.exists()) {
+        if (!hasStorage || !await saveDir.exists()) {
+          // 权限未授予或目录不存在，回退到应用文档目录
           saveDir = await getApplicationDocumentsDirectory();
         }
       } else {
