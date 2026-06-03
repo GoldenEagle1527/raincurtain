@@ -15,10 +15,14 @@ class ConsoleMessage {
   final String message;
   final DateTime timestamp;
 
+  /// 源码位置（如 "main.js:129"），可为 null
+  final String? source;
+
   const ConsoleMessage({
     required this.level,
     required this.message,
     required this.timestamp,
+    this.source,
   });
 }
 
@@ -63,11 +67,12 @@ class ConsoleManager extends ChangeNotifier {
   int countByLevel(ConsoleLevel level) => _levelCounts[level] ?? 0;
 
   /// 添加一条日志
-  void addMessage(ConsoleLevel level, String message) {
+  void addMessage(ConsoleLevel level, String message, {String? source}) {
     _messages.add(ConsoleMessage(
       level: level,
       message: message,
       timestamp: DateTime.now(),
+      source: source,
     ));
     _levelCounts[level] = (_levelCounts[level] ?? 0) + 1;
 

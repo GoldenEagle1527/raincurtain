@@ -2,10 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import '../models/console_manager.dart' as console_model;
 
-/// 悬浮控制台面板
+/// 控制台面板
 ///
 /// 模拟浏览器 DevTools Console 面板，显示 WebView 的 console 输出，
 /// 支持按级别过滤、清除日志、输入 JS 表达式执行。
+/// 布局方向和尺寸由外部容器控制。
 class ConsolePanel extends StatefulWidget {
   final console_model.ConsoleManager consoleManager;
 
@@ -85,7 +86,6 @@ class _ConsolePanelState extends State<ConsolePanel> {
     final code = _inputController.text.trim();
     if (code.isEmpty) return;
 
-    // 将输入记录为一条 log 消息（带 > 前缀标识输入）
     widget.consoleManager.addMessage(console_model.ConsoleLevel.info, '> $code');
     _inputController.clear();
 
@@ -119,7 +119,6 @@ class _ConsolePanelState extends State<ConsolePanel> {
 
       if (result != null) {
         final resultStr = result.toString();
-        // 判断是否是错误结果
         if (resultStr.startsWith('❌ ')) {
           widget.consoleManager.addMessage(
             console_model.ConsoleLevel.error,
@@ -134,7 +133,6 @@ class _ConsolePanelState extends State<ConsolePanel> {
     }
   }
 
-  /// 将 Dart 字符串转义为 JS 字符串字面量
   String _escapeJSString(String s) {
     final escaped = s
         .replaceAll('\\', '\\\\')
@@ -152,14 +150,10 @@ class _ConsolePanelState extends State<ConsolePanel> {
     final messages = widget.consoleManager.filteredMessages;
 
     return Material(
-      elevation: 8,
-      borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
       color: colorScheme.surfaceContainerHighest,
-      surfaceTintColor: colorScheme.primary,
       child: Column(
-        mainAxisSize: MainAxisSize.min,
         children: [
-          // 拖拽手柄 + 标题栏
+          // 标题栏
           _buildHeader(colorScheme, messages.length),
           // 过滤器工具栏
           _buildFilterBar(colorScheme),
@@ -176,30 +170,13 @@ class _ConsolePanelState extends State<ConsolePanel> {
     );
   }
 
-  /// 标题栏：拖拽手柄 + 标题 + 关闭按钮
+  /// 标题栏
   Widget _buildHeader(ColorScheme colorScheme, int messageCount) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-      decoration: BoxDecoration(
-        color: colorScheme.surfaceContainerHigh,
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
-      ),
+      color: colorScheme.surfaceContainerHigh,
       child: Row(
         children: [
-          // 拖拽手柄指示器
-          Expanded(
-            child: Center(
-              child: Container(
-                width: 32,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: colorScheme.onSurfaceVariant.withValues(alpha: 0.4),
-                  borderRadius: BorderRadius.circular(2),
-                ),
-              ),
-            ),
-          ),
-          const SizedBox(width: 8),
           Icon(
             Icons.terminal,
             size: 16,
@@ -382,13 +359,15 @@ class _ConsolePanelState extends State<ConsolePanel> {
       );
     }
 
-    return ListView.builder(
-      controller: _scrollController,
-      padding: const EdgeInsets.symmetric(vertical: 2),
-      itemCount: messages.length,
-      itemBuilder: (context, index) {
-        return _buildMessageItem(messages[index], colorScheme, index);
-      },
+    return SelectionArea(
+      child: ListView.builder(
+        controller: _scrollController,
+        padding: const EdgeInsets.symmetric(vertical: 2),
+        itemCount: messages.length,
+        itemBuilder: (context, index) {
+          return _buildMessageItem(messages[index], colorScheme, index);
+        },
+      ),
     );
   }
 
@@ -444,7 +423,7 @@ class _ConsolePanelState extends State<ConsolePanel> {
           const SizedBox(width: 6),
           // 消息内容
           Expanded(
-            child: SelectableText(
+            child: Text(
               msg.message,
               style: TextStyle(
                 fontSize: 12,
@@ -454,6 +433,19 @@ class _ConsolePanelState extends State<ConsolePanel> {
               ),
             ),
           ),
+          // 源码位置
+          if (msg.source != null)
+            Padding(
+              padding: const EdgeInsets.only(left: 8),
+              child: Text(
+                msg.source!,
+                style: TextStyle(
+                  fontSize: 10,
+                  fontFamily: 'monospace',
+                  color: colorScheme.primary.withValues(alpha: 0.7),
+                ),
+              ),
+            ),
         ],
       ),
     );
@@ -547,7 +539,6 @@ class _ConsolePanelState extends State<ConsolePanel> {
       case console_model.ConsoleLevel.error:
         return colorScheme.error.withValues(alpha: 0.06);
       default:
-        // 奇偶行交替底色
         return index.isEven
             ? Colors.transparent
             : colorScheme.onSurface.withValues(alpha: 0.02);

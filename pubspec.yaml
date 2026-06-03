@@ -1,7 +1,7 @@
 name: raincurtain
 description: "RainCurtain - 雨幕插件系统"
 publish_to: 'none'
-version: 1.1.5+2
+version: 1.1.8+2
 
 environment:
   sdk: ^3.11.3

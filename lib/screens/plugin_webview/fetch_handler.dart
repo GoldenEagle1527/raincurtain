@@ -6,9 +6,9 @@ import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:http/http.dart' as http;
 import 'package:http_parser/http_parser.dart' as http_parser;
 import 'package:path_provider/path_provider.dart';
+import 'package:file_picker/file_picker.dart';
 import '../../main.dart' show sandboxServerPort;
 import '../../utils/permission_utils.dart';
-import 'fetch_cache.dart';
 
 /// Fetch/XHR 网络请求相关的 JS polyfill 和 Handler 注册
 mixin FetchMixin {
@@ -17,9 +17,6 @@ mixin FetchMixin {
 
   // 性能监控：记录请求指标
   final Map<String, FetchMetrics> _requestMetrics = {};
-
-  // GET 请求缓存（LRU，最多 50 条，按 Cache-Control 设置 TTL）
-  final RequestCache _requestCache = RequestCache();
 
   /// 注入 JS：拦截跨域 fetch/XMLHttpRequest，请求改由 Flutter 侧发起
   static String get polyfillJS => r"""
@@ -548,6 +545,65 @@ mixin FetchMixin {
 
     window.XMLHttpRequest = RainCurtainXHR;
   }
+
+  // ===== 拦截 <a download> 点击，转由 Flutter 处理 =====
+  // 在 document 层面捕获所有点击，检测目标是否为带 download 属性的 <a> 标签
+  document.addEventListener('click', async function(e) {
+    if (!window.flutter_inappwebview) return;
+
+    // 找到最近的 <a> 祖先
+    var el = e.target;
+    while (el && el.tagName !== 'A') {
+      el = el.parentElement;
+    }
+    if (!el || el.tagName !== 'A') return;
+
+    // 必须带有 download 属性
+    if (!el.hasAttribute('download')) return;
+
+    var href = el.href || '';
+    if (!href) return;
+
+    // 阻止 WebView 原生下载行为（必须在 await 之前同步调用）
+    e.preventDefault();
+    e.stopPropagation();
+
+    var filename = el.getAttribute('download') || '';
+    if (!filename) {
+      // 从 URL 推断文件名
+      try {
+        var pathname = new URL(href).pathname;
+        filename = pathname.substring(pathname.lastIndexOf('/') + 1) || 'download';
+      } catch (_) {
+        filename = 'download';
+      }
+    }
+
+    // 对于 blob: URL，立即在 JS 侧读取数据并转为 data: URI
+    // 原因：插件代码可能在 a.click() 后立即 revokeObjectURL，
+    // 若等到 Flutter 异步回调再去读取，blob 很可能已被释放
+    if (href.indexOf('blob:') === 0) {
+      try {
+        var fetchFn = originalFetch || window.fetch;
+        var resp = await fetchFn(href);
+        var blob = await resp.blob();
+        var mimeType = blob.type || 'application/octet-stream';
+        var base64 = await blobToBase64(blob);
+        href = 'data:' + mimeType + ';base64,' + base64;
+      } catch (blobErr) {
+        console.error('[raincurtain] failed to read blob before revoke:', blobErr);
+        return;
+      }
+    }
+
+    window.flutter_inappwebview.callHandler('raincurtain_download', {
+      url: href,
+      filename: filename,
+    }).catch(function(err) {
+      console.error('[raincurtain] download handler failed:', err);
+    });
+  }, true); // 使用捕获阶段确保在插件代码之前执行
+
 })();
 """;
 
@@ -561,61 +617,178 @@ mixin FetchMixin {
   }
 
   /// 处理 WebView 触发的下载请求
-  /// 支持 data: URI（base64 内联数据）和普通 http/https URL
+  /// 支持 data: URI（base64 内联数据）、blob: URI（WebView evaluateJavascript）和普通 http/https URL
   Future<void> handleDownload({
     required BuildContext context,
     required bool mounted,
     required String url,
+    InAppWebViewController? controller,
     String? suggestedFilename,
     String? mimeType,
   }) async {
     try {
-      // 确定保存目录：优先使用外部存储 Downloads，回退到应用文档目录
-      Directory saveDir;
-      if (Platform.isAndroid) {
-        // 按需请求存储权限（Android 13+ 自动处理，不会弹窗）
-        final hasStorage = await PermissionUtils.requestStoragePermission();
-
-        // Android 外部存储 Downloads 目录
-        saveDir = Directory('/storage/emulated/0/Download');
-        if (!hasStorage || !await saveDir.exists()) {
-          // 权限未授予或目录不存在，回退到应用文档目录
-          saveDir = await getApplicationDocumentsDirectory();
-        }
-      } else {
-        saveDir = await getApplicationDocumentsDirectory();
-      }
-
       final filename = suggestedFilename?.isNotEmpty == true
           ? suggestedFilename!
           : 'download_${DateTime.now().millisecondsSinceEpoch}';
-      final savePath = '${saveDir.path}/$filename';
+
+      List<String>? allowedExtensions;
+      final dotIdx = filename.lastIndexOf('.');
+      if (dotIdx > 0 && dotIdx < filename.length - 1) {
+        allowedExtensions = [filename.substring(dotIdx + 1)];
+      }
+
+      Uint8List? fileBytes;
 
       if (url.startsWith('data:')) {
-        // 处理 data: URI（如 data:text/plain;base64,... 或 data:text/plain;charset=utf-8,...）
         final commaIdx = url.indexOf(',');
-        if (commaIdx == -1) return;
-        final header = url.substring(5, commaIdx); // 去掉 "data:"
+        if (commaIdx == -1) throw Exception('无效的 Data URI');
+        final header = url.substring(5, commaIdx);
         final body = url.substring(commaIdx + 1);
         final isBase64 = header.contains(';base64');
-        final bytes = isBase64
+        fileBytes = isBase64
             ? base64Decode(body)
-            : utf8.encode(Uri.decodeComponent(body));
-        await File(savePath).writeAsBytes(bytes);
+            : Uint8List.fromList(utf8.encode(Uri.decodeComponent(body)));
+      } else if (url.startsWith('blob:')) {
+        if (controller == null) {
+          throw Exception('WebView 控制器不可用，无法解析 blob 资源');
+        }
+
+        final jsCode = """
+          (async function() {
+            try {
+              var response = await fetch('$url');
+              var blob = await response.blob();
+              return await new Promise(function(resolve, reject) {
+                var reader = new FileReader();
+                reader.onloadend = function() { resolve(reader.result); };
+                reader.onerror = reject;
+                reader.readAsDataURL(blob);
+              });
+            } catch (e) {
+              return 'error: ' + e.message;
+            }
+          })()
+        """;
+
+        final dynamic jsResult = await controller.evaluateJavascript(source: jsCode);
+        if (jsResult == null) {
+          throw Exception('无法从 WebView 读取 blob 资源（返回空值）');
+        }
+        final String resultStr = jsResult.toString();
+        if (resultStr.startsWith('error:')) {
+          throw Exception('读取 blob 资源失败: ${resultStr.substring(6)}');
+        }
+
+        final commaIdx = resultStr.indexOf(',');
+        if (commaIdx == -1) throw Exception('无效的 Blob Base64 数据');
+        final header = resultStr.substring(5, commaIdx);
+        final body = resultStr.substring(commaIdx + 1);
+        final isBase64 = header.contains(';base64');
+        fileBytes = isBase64
+            ? base64Decode(body)
+            : Uint8List.fromList(utf8.encode(Uri.decodeComponent(body)));
+      }
+
+      String? savedPath;
+
+      if (Platform.isWindows) {
+        // Windows 平台：拉起系统的保存文件对话框，如果是网络资源，直接流式下载到该路径
+        savedPath = await FilePicker.saveFile(
+          dialogTitle: '保存文件',
+          fileName: filename,
+          type: allowedExtensions != null ? FileType.custom : FileType.any,
+          allowedExtensions: allowedExtensions,
+        );
+
+        if (savedPath == null) {
+          return; // 用户取消保存
+        }
+
+        if (fileBytes != null) {
+          await File(savedPath).writeAsBytes(fileBytes);
+        } else {
+          final client = HttpClient();
+          final request = await client.getUrl(Uri.parse(url));
+          final response = await request.close();
+          if (response.statusCode >= 200 && response.statusCode < 300) {
+            final file = File(savedPath);
+            final parent = file.parent;
+            if (!await parent.exists()) {
+              await parent.create(recursive: true);
+            }
+            final raf = await file.open(mode: FileMode.write);
+            await response.forEach((chunk) async {
+              await raf.writeFrom(chunk);
+            });
+            await raf.close();
+          } else {
+            client.close();
+            throw Exception('服务器返回错误代码: ${response.statusCode}');
+          }
+          client.close();
+        }
+      } else if (Platform.isAndroid) {
+        // Android 平台：下载数据（如果是网络 URL，流式下载到临时文件，再读取 bytes）并调用 FilePicker 导出
+        Uint8List bytesToSave;
+        if (fileBytes != null) {
+          bytesToSave = fileBytes;
+        } else {
+          await PermissionUtils.requestStoragePermission();
+
+          final tempDir = await getTemporaryDirectory();
+          final tempFile = File('${tempDir.path}/temp_download_${DateTime.now().millisecondsSinceEpoch}');
+          
+          final client = HttpClient();
+          final request = await client.getUrl(Uri.parse(url));
+          final response = await request.close();
+          if (response.statusCode >= 200 && response.statusCode < 300) {
+            final raf = await tempFile.open(mode: FileMode.write);
+            await response.forEach((chunk) async {
+              await raf.writeFrom(chunk);
+            });
+            await raf.close();
+            client.close();
+            bytesToSave = await tempFile.readAsBytes();
+            await tempFile.delete();
+          } else {
+            client.close();
+            if (await tempFile.exists()) await tempFile.delete();
+            throw Exception('服务器返回错误代码: ${response.statusCode}');
+          }
+        }
+
+        savedPath = await FilePicker.saveFile(
+          dialogTitle: '保存文件',
+          fileName: filename,
+          bytes: bytesToSave,
+          type: allowedExtensions != null ? FileType.custom : FileType.any,
+          allowedExtensions: allowedExtensions,
+        );
+
+        if (savedPath == null) {
+          return; // 用户取消保存
+        }
       } else {
-        // 普通 HTTP/HTTPS URL：用 HttpClient 下载
-        final client = HttpClient();
-        final request = await client.getUrl(Uri.parse(url));
-        final response = await request.close();
-        final bytes = await consolidateHttpClientResponseBytes(response);
-        await File(savePath).writeAsBytes(bytes);
-        client.close();
+        // 其他平台降级处理
+        final saveDir = await getApplicationDocumentsDirectory();
+        savedPath = '${saveDir.path}/$filename';
+        if (fileBytes != null) {
+          await File(savedPath).writeAsBytes(fileBytes);
+        } else {
+          final client = HttpClient();
+          final request = await client.getUrl(Uri.parse(url));
+          final response = await request.close();
+          final bytes = await consolidateHttpClientResponseBytes(response);
+          await File(savedPath).writeAsBytes(bytes);
+          client.close();
+        }
       }
 
       if (mounted) {
+        final displayPath = savedPath.split(Platform.pathSeparator).last;
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('\u2705 已下载到: $savePath'),
+            content: Text('✨ 已成功保存: $displayPath'),
             duration: const Duration(seconds: 4),
           ),
         );
@@ -624,12 +797,40 @@ mixin FetchMixin {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('\u274c 下载失败: $e'),
+            content: Text('❌ 保存失败: $e'),
             backgroundColor: Theme.of(context).colorScheme.error,
           ),
         );
       }
     }
+  }
+
+  /// 注册 <a download> 下载拦截 Handler
+  /// 接收来自 polyfill JS 的下载请求，调用 handleDownload 走 Flutter 原生保存对话框
+  void registerDownloadHandler(
+    InAppWebViewController controller, {
+    required BuildContext context,
+    required bool Function() isMounted,
+  }) {
+    controller.addJavaScriptHandler(
+      handlerName: 'raincurtain_download',
+      callback: (args) async {
+        if (args.isEmpty) return null;
+        final data = args[0] as Map<dynamic, dynamic>;
+        final url = data['url'] as String? ?? '';
+        final filename = data['filename'] as String? ?? '';
+        if (url.isEmpty) return null;
+
+        await handleDownload(
+          context: context,
+          mounted: isMounted(),
+          url: url,
+          controller: controller,
+          suggestedFilename: filename.isNotEmpty ? filename : null,
+        );
+        return null;
+      },
+    );
   }
 
   /// 注册 Fetch/XHR Handler
@@ -686,28 +887,6 @@ mixin FetchMixin {
 
         bool isStreaming = false;
         try {
-          // --- 检查 GET 请求缓存 ---
-          if (method == 'GET') {
-            final cached = _requestCache.get(url);
-            if (cached != null) {
-              metrics.complete(cached.statusCode, cached.bodyBytes.length);
-              metrics.log();
-              _requestMetrics.remove(requestId);
-              _activeRequests.remove(requestId);
-
-              final responseHeaders = cached.headers;
-              return {
-                'ok': cached.statusCode >= 200 && cached.statusCode < 300,
-                'success': true, // 缓存命中也算成功
-                'status': cached.statusCode,
-                'statusText': cached.reasonPhrase ?? '',
-                'headers': responseHeaders,
-                'bodyBase64': base64Encode(cached.bodyBytes),
-                'streaming': false,
-              };
-            }
-          }
-
           http.BaseRequest request;
 
           // 构造请求体
@@ -837,14 +1016,6 @@ mixin FetchMixin {
 
           final responseHeaders = response.headers;
 
-          // 存入缓存（仅 GET）
-          if (method == 'GET' && response.statusCode >= 200 && response.statusCode < 300) {
-            final cacheEntry = CachedResponse.fromResponse(response);
-            if (cacheEntry != null) {
-              _requestCache.put(url, cacheEntry);
-            }
-          }
-
           return {
             'ok': response.statusCode >= 200 && response.statusCode < 300,
             'success': true, // 网络层成功（有 HTTP 响应）
@@ -906,6 +1077,39 @@ mixin FetchMixin {
     }
     _activeRequests.clear();
     _requestMetrics.clear();
-    _requestCache.clear();
+  }
+}
+
+/// 网络请求性能指标
+class FetchMetrics {
+  final DateTime startTime;
+  final String url;
+  final String method;
+  int? statusCode;
+  int? responseSize;
+  String? error;
+
+  FetchMetrics({
+    required this.url,
+    required this.method,
+  }) : startTime = DateTime.now();
+
+  Duration get duration => DateTime.now().difference(startTime);
+
+  void complete(int status, int size) {
+    statusCode = status;
+    responseSize = size;
+  }
+
+  void fail(String err) {
+    error = err;
+  }
+
+  void log() {
+    if (error != null) {
+      debugPrint('[RainCurtain Fetch] ❌ $method $url\n  Error: $error\n  Duration: ${duration.inMilliseconds}ms');
+    } else {
+      debugPrint('[RainCurtain Fetch] ✅ $method $url\n  Status: $statusCode\n  Size: ${responseSize ?? 0} bytes\n  Duration: ${duration.inMilliseconds}ms');
+    }
   }
 }

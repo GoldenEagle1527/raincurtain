@@ -33,6 +33,16 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   
   /// 缓存标签页组件实例，以 TabItem.id 为键，避免切换时重载
   final Map<String, Widget> _tabCache = {};
+
+  /// 控制台面板尺寸占比（手机为高度比，桌面/平板为宽度比）
+  double _consoleSizeFraction = 0.35;
+
+  /// 拖拽分隔条的粗细
+  static const double _dividerThickness = 6.0;
+
+  /// 控制台最小/最大尺寸占比
+  static const double _minConsoleFraction = 0.15;
+  static const double _maxConsoleFraction = 0.70;
   
   @override
   void dispose() {
@@ -481,37 +491,165 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       children.add(cachedWidget);
     }
 
-    // 获取当前插件 tab 的 ConsoleManager（如果有的话）
+    // 获取当前插件 tab 的 ConsoleManager
     final currentIndex = tabManager.currentIndex;
     final currentState = _webViewKeys[currentIndex]?.currentState;
     final consoleManager = currentState?.consoleManager;
     final isConsoleVisible = consoleManager?.isVisible ?? false;
 
-    return Stack(
-      children: [
-        // 主内容：标签页切换
-        IndexedStack(
-          index: currentIndex,
-          children: children,
-        ),
-        // 悬浮控制台面板
-        if (isConsoleVisible && consoleManager != null)
-          Positioned(
-            left: 0,
-            right: 0,
-            bottom: 0,
-            height: MediaQuery.of(context).size.height * 0.4,
-            child: ConsolePanel(
-              consoleManager: consoleManager,
-              webViewController: currentState?.webViewController,
-              onClose: () {
-                setState(() {
-                  consoleManager.hide();
-                });
-              },
+    // 主内容区（WebView / 市场页）
+    final mainContent = IndexedStack(
+      index: currentIndex,
+      children: children,
+    );
+
+    // 控制台未打开时直接返回主内容
+    if (!isConsoleVisible || consoleManager == null) {
+      return mainContent;
+    }
+
+    // 控制台面板
+    final consolePanel = ConsolePanel(
+      consoleManager: consoleManager,
+      webViewController: currentState?.webViewController,
+      onClose: () {
+        setState(() {
+          consoleManager.hide();
+        });
+      },
+    );
+
+    final colorScheme = Theme.of(context).colorScheme;
+    final isCompact = ResponsiveHelper.isCompact(context);
+
+    if (isCompact) {
+      // ── 手机：上下分栏，控制台在底部 ──
+      return LayoutBuilder(
+        builder: (context, constraints) {
+          final totalHeight = constraints.maxHeight;
+          final consoleHeight = (totalHeight * _consoleSizeFraction)
+              .clamp(_dividerThickness + 80, totalHeight - 80);
+          final mainHeight = totalHeight - consoleHeight - _dividerThickness;
+
+          return Column(
+            children: [
+              // WebView 区域（挤压）
+              SizedBox(
+                height: mainHeight,
+                child: mainContent,
+              ),
+              // 可拖拽的水平分隔条
+              _buildHorizontalDragHandle(
+                colorScheme, totalHeight,
+              ),
+              // 控制台面板
+              SizedBox(
+                height: consoleHeight,
+                child: consolePanel,
+              ),
+            ],
+          );
+        },
+      );
+    } else {
+      // ── 桌面/平板：左右分栏，控制台在右侧 ──
+      return LayoutBuilder(
+        builder: (context, constraints) {
+          final totalWidth = constraints.maxWidth;
+          final consoleWidth = (totalWidth * _consoleSizeFraction)
+              .clamp(_dividerThickness + 200, totalWidth - 200);
+          final mainWidth = totalWidth - consoleWidth - _dividerThickness;
+
+          return Row(
+            children: [
+              // WebView 区域（挤压）
+              SizedBox(
+                width: mainWidth,
+                child: mainContent,
+              ),
+              // 可拖拽的垂直分隔条
+              _buildVerticalDragHandle(
+                colorScheme, totalWidth,
+              ),
+              // 控制台面板
+              SizedBox(
+                width: consoleWidth,
+                child: consolePanel,
+              ),
+            ],
+          );
+        },
+      );
+    }
+  }
+
+  /// 水平分隔条（手机底部面板，上下拖拽调节高度）
+  Widget _buildHorizontalDragHandle(
+    ColorScheme colorScheme,
+    double totalSize,
+  ) {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onVerticalDragUpdate: (details) {
+        setState(() {
+          _consoleSizeFraction -= details.primaryDelta! / totalSize;
+          _consoleSizeFraction = _consoleSizeFraction.clamp(
+            _minConsoleFraction, _maxConsoleFraction,
+          );
+        });
+      },
+      child: MouseRegion(
+        cursor: SystemMouseCursors.resizeRow,
+        child: Container(
+          height: _dividerThickness,
+          color: colorScheme.outlineVariant.withValues(alpha: 0.3),
+          child: Center(
+            child: Container(
+              width: 32,
+              height: 3,
+              decoration: BoxDecoration(
+                color: colorScheme.onSurfaceVariant.withValues(alpha: 0.4),
+                borderRadius: BorderRadius.circular(1.5),
+              ),
             ),
           ),
-      ],
+        ),
+      ),
+    );
+  }
+
+  /// 垂直分隔条（桌面/平板右侧边栏，左右拖拽调节宽度）
+  Widget _buildVerticalDragHandle(
+    ColorScheme colorScheme,
+    double totalSize,
+  ) {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onHorizontalDragUpdate: (details) {
+        setState(() {
+          _consoleSizeFraction -= details.primaryDelta! / totalSize;
+          _consoleSizeFraction = _consoleSizeFraction.clamp(
+            _minConsoleFraction, _maxConsoleFraction,
+          );
+        });
+      },
+      child: MouseRegion(
+        cursor: SystemMouseCursors.resizeColumn,
+        child: Container(
+          width: _dividerThickness,
+          color: colorScheme.outlineVariant.withValues(alpha: 0.3),
+          child: Center(
+            child: Container(
+              width: 3,
+              height: 32,
+              decoration: BoxDecoration(
+                color: colorScheme.onSurfaceVariant.withValues(alpha: 0.4),
+                borderRadius: BorderRadius.circular(1.5),
+              ),
+            ),
+          ),
+        ),
+      ),
     );
   }
   

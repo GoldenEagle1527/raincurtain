@@ -19,6 +19,7 @@ import 'plugin_webview/ws_handler.dart';
 import 'plugin_webview/udp_handler.dart';
 import 'plugin_webview/dns_handler.dart';
 import 'plugin_webview/orientation_handler.dart';
+import 'plugin_webview/console_handler.dart';
 import '../utils/permission_utils.dart';
 
 /// 插件 WebView 视图
@@ -51,7 +52,8 @@ class PluginWebViewState extends State<PluginWebView>
          WebSocketMixin,
          UdpMixin,
          DnsMixin,
-         OrientationMixin {
+         OrientationMixin,
+         ConsoleMixin {
   @override
   bool get wantKeepAlive => true;
 
@@ -123,24 +125,6 @@ class PluginWebViewState extends State<PluginWebView>
     return false;
   }
 
-  /// 将 InAppWebView 的 ConsoleMessageLevel 映射到 ConsoleLevel
-  ConsoleLevel _mapConsoleLevel(ConsoleMessageLevel level) {
-    switch (level) {
-      case ConsoleMessageLevel.LOG:
-        return ConsoleLevel.log;
-      case ConsoleMessageLevel.WARNING:
-        return ConsoleLevel.warn;
-      case ConsoleMessageLevel.ERROR:
-        return ConsoleLevel.error;
-      case ConsoleMessageLevel.DEBUG:
-        return ConsoleLevel.debug;
-      case ConsoleMessageLevel.TIP:
-        return ConsoleLevel.info;
-      default:
-        return ConsoleLevel.log;
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     super.build(context); // AutomaticKeepAliveClientMixin 要求
@@ -154,6 +138,11 @@ class PluginWebViewState extends State<PluginWebView>
         InAppWebView(
           initialUrlRequest: URLRequest(url: WebUri(url)),
           initialUserScripts: UnmodifiableListView([
+            // 注入 console 拦截脚本（必须最先注入，以便在插件代码之前拦截）
+            UserScript(
+              source: ConsoleMixin.polyfillJS,
+              injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
+            ),
             // 注入当前应用的主题色系和基础样式
             UserScript(
               source: theme.generateThemeJS(Theme.of(context)),
@@ -293,11 +282,17 @@ class PluginWebViewState extends State<PluginWebView>
               getWebViewController: () => webViewController,
               isMounted: () => mounted,
             );
+            registerDownloadHandler(
+              controller,
+              context: context,
+              isMounted: () => mounted,
+            );
             registerFileSystemHandlers(controller);
             registerWsHandlers(controller);
             registerUdpHandlers(controller);
             registerDnsHandlers(controller);
             registerOrientationHandlers(controller);
+            registerConsoleHandlers(controller, consoleManager);
           },
           // 拦截下载请求
           onDownloadStartRequest: (controller, downloadRequest) async {
@@ -305,6 +300,7 @@ class PluginWebViewState extends State<PluginWebView>
               context: context,
               mounted: mounted,
               url: downloadRequest.url.toString(),
+              controller: controller,
               suggestedFilename: downloadRequest.suggestedFilename,
               mimeType: downloadRequest.mimeType,
             );
@@ -338,6 +334,12 @@ class PluginWebViewState extends State<PluginWebView>
               return;
             }
 
+            // 将网络错误记录到控制台
+            consoleManager.addMessage(
+              ConsoleLevel.error,
+              '${error.description}\n${request.url}',
+            );
+
             setState(() {
               hasError = true;
               errorMessage = error.description;
@@ -345,13 +347,14 @@ class PluginWebViewState extends State<PluginWebView>
             });
           },
           onReceivedHttpError: (controller, request, errorResponse) {
-            // 忽略 404 等由于页面资源未找到导致的错误
-          },
-          // 拦截 WebView 中的 console.* 输出，转发到 ConsoleManager
-          onConsoleMessage: (controller, consoleMessage) {
+            // 将 HTTP 错误记录到控制台（模拟浏览器 DevTools 的行为）
+            final url = request.url.toString();
+            final statusCode = errorResponse.statusCode;
+            final reasonPhrase = errorResponse.reasonPhrase ?? '';
             consoleManager.addMessage(
-              _mapConsoleLevel(consoleMessage.messageLevel),
-              consoleMessage.message,
+              ConsoleLevel.error,
+              'Failed to load resource: the server responded with a status of '
+              '$statusCode ($reasonPhrase)\n$url',
             );
           },
         ),
