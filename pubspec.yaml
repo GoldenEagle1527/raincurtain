@@ -1,13 +1,14 @@
 name: raincurtain
 description: "RainCurtain - 雨幕插件系统"
 publish_to: 'none'
-version: 1.1.9+2
+version: 1.2.1+1
 
 environment:
   sdk: ^3.11.3
 
 dependencies:
   archive: ^4.0.9
+  crypto: ^3.0.3
   file_picker: ^11.0.2
   flutter:
     sdk: flutter
@@ -37,6 +38,7 @@ flutter:
   # Material Icons 字体资源
   assets:
     - assets/fonts/material-icons/
+    - assets/s3_config.json
   
   fonts:
     # 全局默认字体 - 思源宋体

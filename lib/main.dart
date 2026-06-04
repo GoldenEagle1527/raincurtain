@@ -11,6 +11,8 @@ import 'models/window_config_manager.dart';
 import 'models/app_mode_manager.dart';
 import 'models/pool_manager.dart';
 import 'models/variable_pool_manager.dart';
+import 'models/s3_config_manager.dart';
+import 'models/update_manager.dart';
 import 'screens/home_page.dart';
 import 'widgets/rain_background.dart';
 import 'utils/material_icons_registry.dart';
@@ -60,6 +62,8 @@ void main() async {
         ChangeNotifierProvider(create: (_) => AppModeManager()),
         ChangeNotifierProvider(create: (_) => PoolManager()),
         ChangeNotifierProvider(create: (_) => VariablePoolManager()),
+        ChangeNotifierProvider(create: (_) => S3ConfigManager()..init()),
+        ChangeNotifierProvider(create: (_) => UpdateManager()),
       ],
       child: const RainCurtainApp(),
     ),

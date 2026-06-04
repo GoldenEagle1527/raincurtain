@@ -4,6 +4,9 @@ import '../models/plugin_manager.dart';
 import '../models/tab_manager.dart';
 import '../models/app_mode_manager.dart';
 import '../models/pool_manager.dart';
+import '../models/s3_config_manager.dart';
+import '../models/update_manager.dart';
+import '../widgets/update_dialog.dart';
 import '../utils/responsive_helper.dart';
 import '../widgets/theme_toggle_button.dart';
 import '../widgets/closeable_tab.dart';
@@ -28,6 +31,35 @@ class HomePage extends StatefulWidget {
 
 class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   TabController? _tabController;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _autoCheckForUpdates();
+    });
+  }
+
+  void _autoCheckForUpdates() async {
+    final configManager = context.read<S3ConfigManager>();
+    if (!configManager.isInit) {
+      await Future.delayed(const Duration(milliseconds: 1000));
+      if (!mounted) return;
+    }
+
+    final config = configManager.config;
+    if (config == null || config.publicUrl.isEmpty) return;
+
+    final updateManager = context.read<UpdateManager>();
+    await updateManager.checkForUpdates(config);
+
+    if (!mounted) return;
+
+    if (updateManager.status == UpdateStatus.hasUpdate) {
+      showUpdateDialog(context, updateManager, config);
+    }
+  }
+
   /// 每个 tab.id 对应的 PluginWebView GlobalKey，用于访问 consoleManager
   /// 键为稳定的 tab.id（String），避免关闭中间 tab 后 index 漂移导致串台
   final Map<String, GlobalKey<PluginWebViewState>> _webViewKeys = {};
@@ -163,7 +195,10 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
               onPressed: _toggleConsole,
             ),
           IconButton(
-            icon: const Icon(Icons.settings),
+            icon: Badge(
+              isLabelVisible: context.watch<UpdateManager>().status == UpdateStatus.hasUpdate,
+              child: const Icon(Icons.settings),
+            ),
             tooltip: '设置',
             onPressed: () {
               Navigator.push(
@@ -225,7 +260,10 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
               onPressed: _toggleConsole,
             ),
           IconButton(
-            icon: const Icon(Icons.settings),
+            icon: Badge(
+              isLabelVisible: context.watch<UpdateManager>().status == UpdateStatus.hasUpdate,
+              child: const Icon(Icons.settings),
+            ),
             tooltip: '设置',
             onPressed: () {
               Navigator.push(
@@ -344,7 +382,10 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
               onPressed: () => _showCreatePoolDialog(context),
             ),
           IconButton(
-            icon: const Icon(Icons.settings),
+            icon: Badge(
+              isLabelVisible: context.watch<UpdateManager>().status == UpdateStatus.hasUpdate,
+              child: const Icon(Icons.settings),
+            ),
             tooltip: '设置',
             onPressed: () {
               Navigator.push(
