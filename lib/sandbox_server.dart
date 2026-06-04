@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:path/path.dart' as p;
 
@@ -18,7 +19,8 @@ class SandboxServer {
       port,
       shared: true,
     );
-    _server!.listen((HttpRequest request) async {
+    _server!.listen(
+      (HttpRequest request) async {
       final path = request.uri.path == '/' ? '/index.html' : request.uri.path;
 
       // 处理 OPTIONS 预检请求
@@ -56,7 +58,13 @@ class SandboxServer {
         request.response.write('Not Found');
         await request.response.close();
       }
-    });
+    },
+    onError: (Object error, StackTrace stackTrace) {
+      // 单个请求流错误仅打印日志，不中断服务器
+      debugPrint('[SandboxServer] Stream error: $error');
+    },
+    cancelOnError: false,
+  );
     return _server!.port;
   }
 

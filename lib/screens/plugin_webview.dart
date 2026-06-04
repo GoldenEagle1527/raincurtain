@@ -98,6 +98,8 @@ class PluginWebViewState extends State<PluginWebView>
     disposeUdp();
     // 释放 DNS 管理器
     disposeDns();
+    // 关闭所有打开的文件写入句柄
+    disposeFileSystem();
     // 恢复屏幕方向（如果插件锁定了方向）
     disposeOrientation();
     // 释放 WebView 控制器引用

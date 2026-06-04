@@ -181,8 +181,12 @@ mixin RainCurtainApiMixin {
         if (!context.mounted) return null;
         final dataManager = context.read<PluginDataManager>();
         if (!dataManager.isInit) return null;
-        await dataManager.pluginStorageManager.upsertOutput(
-            plugin.id, name, value);
+        await dataManager.pluginStorageManager
+            .upsertOutput(plugin.id, name, value)
+            .timeout(
+              const Duration(seconds: 10),
+              onTimeout: () => throw Exception('rc_set_output: DB timeout'),
+            );
 
         // 2. 溯流模式：检查 outputMappings 写入变量池
         if (poolId != null && poolPluginId != null && context.mounted) {
@@ -254,8 +258,12 @@ mixin RainCurtainApiMixin {
         if (!dataManager.isInit) return {'insertedCount': 0};
 
         try {
-          final count = await dataManager.pluginStorageManager.insert(
-              plugin.id, table, rows);
+          final count = await dataManager.pluginStorageManager
+              .insert(plugin.id, table, rows)
+              .timeout(
+                const Duration(seconds: 10),
+                onTimeout: () => throw Exception('rc_storage_insert: DB timeout'),
+              );
           return {'insertedCount': count};
         } catch (e) {
           debugPrint('rc_storage_insert error: $e');
@@ -305,14 +313,19 @@ mixin RainCurtainApiMixin {
         if (!dataManager.isInit) return [];
 
         try {
-          return await dataManager.pluginStorageManager.query(
-            plugin.id,
-            table,
-            where: where,
-            orderBy: orderBy,
-            limit: limit,
-            offset: offset,
-          );
+          return await dataManager.pluginStorageManager
+              .query(
+                plugin.id,
+                table,
+                where: where,
+                orderBy: orderBy,
+                limit: limit,
+                offset: offset,
+              )
+              .timeout(
+                const Duration(seconds: 10),
+                onTimeout: () => throw Exception('rc_storage_query: DB timeout'),
+              );
         } catch (e) {
           debugPrint('rc_storage_query error: $e');
           return [];
@@ -363,8 +376,12 @@ mixin RainCurtainApiMixin {
         if (!dataManager.isInit) return {'updatedCount': 0};
 
         try {
-          final count = await dataManager.pluginStorageManager.update(
-              plugin.id, table, values, where);
+          final count = await dataManager.pluginStorageManager
+              .update(plugin.id, table, values, where)
+              .timeout(
+                const Duration(seconds: 10),
+                onTimeout: () => throw Exception('rc_storage_update: DB timeout'),
+              );
           return {'updatedCount': count};
         } catch (e) {
           debugPrint('rc_storage_update error: $e');
@@ -409,8 +426,12 @@ mixin RainCurtainApiMixin {
         if (!dataManager.isInit) return {'deletedCount': 0};
 
         try {
-          final count = await dataManager.pluginStorageManager.delete(
-              plugin.id, table, where);
+          final count = await dataManager.pluginStorageManager
+              .delete(plugin.id, table, where)
+              .timeout(
+                const Duration(seconds: 10),
+                onTimeout: () => throw Exception('rc_storage_delete: DB timeout'),
+              );
           return {'deletedCount': count};
         } catch (e) {
           debugPrint('rc_storage_delete error: $e');
@@ -455,8 +476,12 @@ mixin RainCurtainApiMixin {
         if (!dataManager.isInit) return 0;
 
         try {
-          return await dataManager.pluginStorageManager.count(
-              plugin.id, table, where);
+          return await dataManager.pluginStorageManager
+              .count(plugin.id, table, where)
+              .timeout(
+                const Duration(seconds: 10),
+                onTimeout: () => throw Exception('rc_storage_count: DB timeout'),
+              );
         } catch (e) {
           debugPrint('rc_storage_count error: $e');
           return 0;
@@ -479,7 +504,12 @@ mixin RainCurtainApiMixin {
         if (!dataManager.isInit) return;
 
         try {
-          await dataManager.pluginStorageManager.clear(plugin.id, table);
+          await dataManager.pluginStorageManager
+              .clear(plugin.id, table)
+              .timeout(
+                const Duration(seconds: 10),
+                onTimeout: () => throw Exception('rc_storage_clear: DB timeout'),
+              );
         } catch (e) {
           debugPrint('rc_storage_clear error: $e');
         }

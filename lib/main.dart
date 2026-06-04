@@ -75,6 +75,8 @@ class RainCurtainApp extends StatefulWidget {
 
 class _RainCurtainAppState extends State<RainCurtainApp> {
   bool _serverStarted = false;
+  String? _serverError; // 服务器启动失败时保存错误信息
+  PluginManager? _pm;   // 保存引用以便 dispose 时移除监听器
 
   @override
   void initState() {
@@ -84,40 +86,59 @@ class _RainCurtainAppState extends State<RainCurtainApp> {
       final windowConfig = Provider.of<WindowConfigManager>(context, listen: false);
       windowConfig.init();
 
-      final pm = Provider.of<PluginManager>(context, listen: false);
-      
-      void checkAndStartServer() async {
-        if (pm.isInit && !_serverStarted) {
-          localhostServer = SandboxServer(
-            documentRoot: pm.sandboxDir,
-          );
-          await localhostServer!.start();
-          sandboxServerPort = localhostServer!.actualPort;
+      _pm = Provider.of<PluginManager>(context, listen: false);
+      _pm!.addListener(_checkAndStartServer);
+      _checkAndStartServer(); // 立即检查一次
+    });
+  }
 
-          // 启动插件管理 API 服务器
-          pluginApiServer = PluginApiServer(pm);
-          final apiStarted = await pluginApiServer!.start();
-          if (apiStarted) {
-            debugPrint('Plugin API Server started at http://127.0.0.1:${PluginApiServer.kPort}');
-          } else {
-            debugPrint('Plugin API Server failed to start (port in use?), external tools will be unavailable');
-          }
+  /// 尝试启动 SandboxServer 和 PluginApiServer
+  void _checkAndStartServer() async {
+    final pm = _pm;
+    // 已成功启动、或已出错（等待用户手动重试）时不重复执行
+    if (pm == null || !pm.isInit || _serverStarted || _serverError != null) return;
+    try {
+      localhostServer = SandboxServer(
+        documentRoot: pm.sandboxDir,
+      );
+      await localhostServer!.start();
+      sandboxServerPort = localhostServer!.actualPort;
 
-          if (mounted) {
-            setState(() {
-              _serverStarted = true;
-            });
-          }
-        }
+      // 启动插件管理 API 服务器
+      pluginApiServer = PluginApiServer(pm);
+      final apiStarted = await pluginApiServer!.start();
+      if (apiStarted) {
+        debugPrint('Plugin API Server started at http://127.0.0.1:${PluginApiServer.kPort}');
+      } else {
+        debugPrint('Plugin API Server failed to start (port in use?), external tools will be unavailable');
       }
 
-      pm.addListener(checkAndStartServer);
-      checkAndStartServer(); // 也顺便立刻检查一次
+      if (mounted) {
+        setState(() {
+          _serverStarted = true;
+        });
+      }
+    } catch (e) {
+      debugPrint('[RainCurtain] Server start failed: $e');
+      if (mounted) {
+        setState(() {
+          _serverError = e.toString();
+        });
+      }
+    }
+  }
+
+  /// 重试启动服务器（用户点击重试按钮时触发）
+  void _retryServer() {
+    setState(() {
+      _serverError = null;
     });
+    _checkAndStartServer();
   }
 
   @override
   void dispose() {
+    _pm?.removeListener(_checkAndStartServer);
     localhostServer?.close();
     pluginApiServer?.close();
     super.dispose();
@@ -140,9 +161,45 @@ class _RainCurtainAppState extends State<RainCurtainApp> {
           child: child ?? const SizedBox.shrink(),
         );
       },
-      home: _serverStarted
-          ? const HomePage()
-          : const Scaffold(body: Center(child: CircularProgressIndicator())),
+      home: _serverError != null
+          ? _buildServerErrorPage()
+          : _serverStarted
+              ? const HomePage()
+              : const Scaffold(body: Center(child: CircularProgressIndicator())),
+    );
+  }
+
+  /// 服务器启动失败时显示的错误界面
+  Widget _buildServerErrorPage() {
+    return Scaffold(
+      body: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(32),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.error_outline, size: 56, color: Colors.red),
+              const SizedBox(height: 20),
+              const Text(
+                '启动失败',
+                style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 12),
+              Text(
+                _serverError ?? '未知错误',
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: Colors.grey),
+              ),
+              const SizedBox(height: 28),
+              ElevatedButton.icon(
+                onPressed: _retryServer,
+                icon: const Icon(Icons.refresh),
+                label: const Text('重试'),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }

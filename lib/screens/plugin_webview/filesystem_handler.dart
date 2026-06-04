@@ -11,6 +11,9 @@ mixin FileSystemMixin {
   // showSaveFilePicker 在 Android 上先写入缓存目录，close() 后通过 FilePicker.saveFile(bytes) 导出
   final Map<String, String> _pendingSaveExports = {};
 
+  // 分块写入：追踪当前打开的 RandomAccessFile 句柄（路径 → 句柄）
+  final Map<String, RandomAccessFile> _openWriteFiles = {};
+
   /// 注入 JS：覆盖 File System Access API，桥接到 Flutter
   static const String polyfillJS = r"""
 (function() {
@@ -105,14 +108,56 @@ mixin FileSystemMixin {
   };
 
   // ===== FileSystemWritableFileStream =====
+  // 采用分块流式传输，避免大文件全量 base64 驻留内存
+  // 每当缓冲超过 CHUNK_SIZE 就自动透过 rc_fs_write_chunk 推送一块
+
+  var FS_CHUNK_SIZE = 4 * 1024 * 1024; // 4 MB
 
   function FileSystemWritableFileStream(path) {
     this._path = path;
-    this._buffer = [];
-    this._position = 0;
-    this._size = 0;
+    this._buffer = [];    // 待推送的内存块
+    this._bufferedLen = 0; // 当前内存块总字节数
+    this._position = 0;   // 当前负责转换为共识写入位置（seek 用）
+    this._flushedBytes = 0; // 已向 Flutter 层推送的字节数
     this._closed = false;
   }
+
+  // 将当前内存块合并成一个 Uint8Array
+  FileSystemWritableFileStream.prototype._combineBuffer = function() {
+    if (this._buffer.length === 0) return new Uint8Array(0);
+    if (this._buffer.length === 1) return this._buffer[0];
+    var totalLen = 0;
+    for (var i = 0; i < this._buffer.length; i++) totalLen += this._buffer[i].length;
+    var result = new Uint8Array(totalLen);
+    var offset = 0;
+    for (var j = 0; j < this._buffer.length; j++) {
+      result.set(this._buffer[j], offset);
+      offset += this._buffer[j].length;
+    }
+    return result;
+  };
+
+  // 当内存块超过 CHUNK_SIZE 时自动 flush
+  FileSystemWritableFileStream.prototype._maybeFlush = async function() {
+    while (this._bufferedLen >= FS_CHUNK_SIZE) {
+      var combined = this._combineBuffer();
+      var chunk = combined.slice(0, FS_CHUNK_SIZE);
+      var rest  = combined.slice(FS_CHUNK_SIZE);
+      this._buffer = rest.length > 0 ? [rest] : [];
+      this._bufferedLen = rest.length;
+
+      var b64 = arrayBufferToBase64(chunk.buffer);
+      var result = await callFlutter('rc_fs_write_chunk', {
+        path: this._path,
+        data: b64,
+        offset: this._flushedBytes
+      });
+      if (result && result.error) {
+        throw new Error('Failed to write chunk: ' + result.error);
+      }
+      this._flushedBytes += chunk.length;
+    }
+  };
 
   FileSystemWritableFileStream.prototype.write = async function(data) {
     if (this._closed) throw new TypeError('Stream is closed');
@@ -123,19 +168,20 @@ mixin FileSystemMixin {
     // 处理 WriteParams 对象
     if (data && typeof data === 'object' && data.type) {
       if (data.type === 'seek') {
+        // seek 需要先将现有缓冲尤共陆顶再设置位置（简化实现）
         this._position = data.position || 0;
         return;
       }
       if (data.type === 'truncate') {
-        this._size = data.size || 0;
-        // 截断后需要重建缓冲区
-        var combined = this._combineBuffer();
-        if (combined.length > this._size) {
-          this._buffer = [combined.slice(0, this._size)];
-        }
-        if (this._position > this._size) {
-          this._position = this._size;
-        }
+        // flush 当前缓冲，再请求截断
+        await this._flush();
+        var result = await callFlutter('rc_fs_truncate', {
+          path: this._path,
+          size: data.size || 0
+        });
+        if (result && result.error) throw new Error('Failed to truncate: ' + result.error);
+        this._flushedBytes = Math.min(this._flushedBytes, data.size || 0);
+        this._position = Math.min(this._position, data.size || 0);
         return;
       }
       // type === 'write'
@@ -149,8 +195,7 @@ mixin FileSystemMixin {
     if (typeof data === 'string') {
       chunk = new TextEncoder().encode(data);
     } else if (data instanceof Blob) {
-      var ab = await data.arrayBuffer();
-      chunk = new Uint8Array(ab);
+      chunk = new Uint8Array(await data.arrayBuffer());
     } else if (data instanceof ArrayBuffer) {
       chunk = new Uint8Array(data);
     } else if (ArrayBuffer.isView(data)) {
@@ -161,15 +206,32 @@ mixin FileSystemMixin {
       chunk = new TextEncoder().encode(String(data));
     }
 
-    // 写入缓冲区的指定位置
-    var combined = this._combineBuffer();
-    var needed = writePosition + chunk.length;
-    var newBuf = new Uint8Array(Math.max(combined.length, needed));
-    newBuf.set(combined);
-    newBuf.set(chunk, writePosition);
-    this._buffer = [newBuf];
+    // 逐逐写入缓冲（对 seek 展开数据中间的区域会填零）
+    if (writePosition !== this._position + this._bufferedLen &&
+        writePosition !== this._flushedBytes + this._bufferedLen) {
+      // 有非顺序写入：先 flush 已缓冲数据
+      await this._flush();
+    }
+    this._buffer.push(chunk);
+    this._bufferedLen += chunk.length;
     this._position = writePosition + chunk.length;
-    this._size = newBuf.length;
+    await this._maybeFlush();
+  };
+
+  // 将内存剩余全部推送
+  FileSystemWritableFileStream.prototype._flush = async function() {
+    if (this._bufferedLen === 0) return;
+    var combined = this._combineBuffer();
+    this._buffer = [];
+    this._bufferedLen = 0;
+    var b64 = arrayBufferToBase64(combined.buffer);
+    var result = await callFlutter('rc_fs_write_chunk', {
+      path: this._path,
+      data: b64,
+      offset: this._flushedBytes
+    });
+    if (result && result.error) throw new Error('Failed to write chunk: ' + result.error);
+    this._flushedBytes += combined.length;
   };
 
   FileSystemWritableFileStream.prototype.seek = function(position) {
@@ -183,44 +245,30 @@ mixin FileSystemMixin {
     return this.write({ type: 'truncate', size: size });
   };
 
-  FileSystemWritableFileStream.prototype._combineBuffer = function() {
-    if (this._buffer.length === 0) return new Uint8Array(0);
-    if (this._buffer.length === 1) return this._buffer[0];
-    var totalLen = 0;
-    for (var i = 0; i < this._buffer.length; i++) {
-      totalLen += this._buffer[i].length;
-    }
-    var result = new Uint8Array(totalLen);
-    var offset = 0;
-    for (var j = 0; j < this._buffer.length; j++) {
-      result.set(this._buffer[j], offset);
-      offset += this._buffer[j].length;
-    }
-    return result;
-  };
-
   FileSystemWritableFileStream.prototype.close = async function() {
     if (this._closed) return;
     this._closed = true;
 
-    var combined = this._combineBuffer();
-    var base64Data = arrayBufferToBase64(combined.buffer);
+    // 先将剩余缓冲数据全部推送
+    await this._flush();
 
-    var result = await callFlutter('rc_fs_write_file', {
+    // 然后通知 Flutter 层关闭文件句柄
+    var result = await callFlutter('rc_fs_write_close', {
       path: this._path,
-      data: base64Data,
-      size: combined.length
+      totalBytes: this._flushedBytes
     });
-
     if (result && result.error) {
-      throw new Error('Failed to write file: ' + result.error);
+      throw new Error('Failed to close file: ' + result.error);
     }
   };
 
-  FileSystemWritableFileStream.prototype.abort = function() {
+  FileSystemWritableFileStream.prototype.abort = async function() {
+    if (this._closed) return;
     this._closed = true;
     this._buffer = [];
-    return Promise.resolve();
+    this._bufferedLen = 0;
+    // 通知 Flutter 层丢弃正在写入的文件
+    await callFlutter('rc_fs_write_abort', { path: this._path }).catch(function() {});
   };
 
   // ===== FileSystemFileHandle =====
@@ -668,59 +716,147 @@ mixin FileSystemMixin {
       },
     );
 
-    // 写入文件
+    // ── 分块写入第一步：接收一个数据块，按 offset 写入文件 ──
+    // JS 侧每积累 4 MB 调用一次，offset 为已确认写入的字节偏移
     controller.addJavaScriptHandler(
-      handlerName: 'rc_fs_write_file',
+      handlerName: 'rc_fs_write_chunk',
       callback: (args) async {
         try {
           if (args.isEmpty) return {'error': 'Missing arguments'};
           final data = args[0] as Map<dynamic, dynamic>;
           final path = data['path'] as String?;
           final base64Data = data['data'] as String?;
+          final offset = (data['offset'] as num?)?.toInt() ?? 0;
           if (path == null || path.isEmpty) return {'error': 'Missing path'};
           if (base64Data == null) return {'error': 'Missing data'};
 
           final bytes = base64Decode(base64Data);
 
-          // Android: 检查是否为 showSaveFilePicker 产生的待导出文件
+          RandomAccessFile raf;
+          if (_openWriteFiles.containsKey(path)) {
+            raf = _openWriteFiles[path]!;
+          } else {
+            // 首个分块：创建/截断文件并打开句柄
+            final file = File(path);
+            final parent = file.parent;
+            if (!await parent.exists()) {
+              await parent.create(recursive: true);
+            }
+            raf = await file.open(mode: FileMode.write);
+            _openWriteFiles[path] = raf;
+          }
+
+          await raf.setPosition(offset);
+          await raf.writeFrom(bytes);
+          return {'success': true, 'bytesWritten': bytes.length};
+        } catch (e) {
+          debugPrint('rc_fs_write_chunk error: $e');
+          return {'error': e.toString()};
+        }
+      },
+    );
+
+    // ── 分块写入第二步：所有块发送完毕，关闭文件句柄 ──
+    // Android 的 showSaveFilePicker pending export 也在此处理
+    controller.addJavaScriptHandler(
+      handlerName: 'rc_fs_write_close',
+      callback: (args) async {
+        try {
+          if (args.isEmpty) return {'error': 'Missing arguments'};
+          final data = args[0] as Map<dynamic, dynamic>;
+          final path = data['path'] as String?;
+          final totalBytes = (data['totalBytes'] as num?)?.toInt() ?? 0;
+          if (path == null || path.isEmpty) return {'error': 'Missing path'};
+
+          // 关闭 RandomAccessFile 句柄
+          final raf = _openWriteFiles.remove(path);
+          await raf?.close();
+
+          // Android：若为 showSaveFilePicker 产生的待导出文件，触发系统保存对话框
           if (Platform.isAndroid && _pendingSaveExports.containsKey(path)) {
             final exportFileName = _pendingSaveExports.remove(path)!;
-
-            // 从文件名推断扩展名用于 filter
             List<String>? allowedExts;
             final dotIdx = exportFileName.lastIndexOf('.');
             if (dotIdx > 0) {
               allowedExts = [exportFileName.substring(dotIdx + 1)];
             }
-
-            // 直接通过 FilePicker.saveFile 让用户选择保存位置并写入
+            final fileBytes = await File(path).readAsBytes();
             final savedPath = await FilePicker.saveFile(
               dialogTitle: '保存文件',
               fileName: exportFileName,
-              bytes: Uint8List.fromList(bytes),
+              bytes: Uint8List.fromList(fileBytes),
               type: allowedExts != null ? FileType.custom : FileType.any,
               allowedExtensions: allowedExts,
             );
-
+            // 清理临时文件
+            try { await File(path).delete(); } catch (_) {}
             if (savedPath == null) {
               return {'error': 'User cancelled save'};
             }
-            return {'success': true, 'bytesWritten': bytes.length};
           }
 
-          // 非 Android 或非 pending export：直接写入文件系统
-          final file = File(path);
-
-          // 确保父目录存在
-          final parent = file.parent;
-          if (!await parent.exists()) {
-            await parent.create(recursive: true);
-          }
-
-          await file.writeAsBytes(bytes);
-          return {'success': true, 'bytesWritten': bytes.length};
+          return {'success': true, 'bytesWritten': totalBytes};
         } catch (e) {
-          debugPrint('rc_fs_write_file error: $e');
+          debugPrint('rc_fs_write_close error: $e');
+          return {'error': e.toString()};
+        }
+      },
+    );
+
+    // ── 用户取消写入：关闭句柄并删除不完整文件 ──
+    controller.addJavaScriptHandler(
+      handlerName: 'rc_fs_write_abort',
+      callback: (args) async {
+        try {
+          if (args.isEmpty) return {'error': 'Missing arguments'};
+          final data = args[0] as Map<dynamic, dynamic>;
+          final path = data['path'] as String?;
+          if (path == null || path.isEmpty) return {'error': 'Missing path'};
+
+          final raf = _openWriteFiles.remove(path);
+          await raf?.close();
+          _pendingSaveExports.remove(path);
+
+          // 删除残留的不完整文件
+          try {
+            final file = File(path);
+            if (await file.exists()) await file.delete();
+          } catch (_) {}
+          return {'success': true};
+        } catch (e) {
+          debugPrint('rc_fs_write_abort error: $e');
+          return {'error': e.toString()};
+        }
+      },
+    );
+
+    // ── FileSystemWritableFileStream.truncate() 支持 ──
+    controller.addJavaScriptHandler(
+      handlerName: 'rc_fs_truncate',
+      callback: (args) async {
+        try {
+          if (args.isEmpty) return {'error': 'Missing arguments'};
+          final data = args[0] as Map<dynamic, dynamic>;
+          final path = data['path'] as String?;
+          final size = (data['size'] as num?)?.toInt() ?? 0;
+          if (path == null || path.isEmpty) return {'error': 'Missing path'};
+
+          final raf = _openWriteFiles[path];
+          if (raf != null) {
+            // 文件已由当前句柄打开，直接截断
+            await raf.truncate(size);
+          } else {
+            // 文件未打开（极少数情况），临时打开截断后关闭
+            final file = File(path);
+            if (await file.exists()) {
+              final r = await file.open(mode: FileMode.append);
+              await r.truncate(size);
+              await r.close();
+            }
+          }
+          return {'success': true};
+        } catch (e) {
+          debugPrint('rc_fs_truncate error: $e');
           return {'error': e.toString()};
         }
       },
@@ -841,5 +977,14 @@ mixin FileSystemMixin {
         }
       },
     );
+  }
+
+  /// 释放所有打开的文件写入句柄（WebView dispose 时调用）
+  void disposeFileSystem() {
+    for (final raf in _openWriteFiles.values) {
+      try { raf.closeSync(); } catch (_) {}
+    }
+    _openWriteFiles.clear();
+    _pendingSaveExports.clear();
   }
 }

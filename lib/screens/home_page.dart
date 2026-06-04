@@ -28,8 +28,9 @@ class HomePage extends StatefulWidget {
 
 class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   TabController? _tabController;
-  /// 每个 tab index 对应的 PluginWebView GlobalKey，用于访问 consoleManager
-  final Map<int, GlobalKey<PluginWebViewState>> _webViewKeys = {};
+  /// 每个 tab.id 对应的 PluginWebView GlobalKey，用于访问 consoleManager
+  /// 键为稳定的 tab.id（String），避免关闭中间 tab 后 index 漂移导致串台
+  final Map<String, GlobalKey<PluginWebViewState>> _webViewKeys = {};
   
   /// 缓存标签页组件实例，以 TabItem.id 为键，避免切换时重载
   final Map<String, Widget> _tabCache = {};
@@ -50,16 +51,17 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     super.dispose();
   }
 
-  /// 获取或创建指定 tab index 的 GlobalKey
-  GlobalKey<PluginWebViewState> _getWebViewKey(int index) {
-    return _webViewKeys.putIfAbsent(index, () => GlobalKey<PluginWebViewState>());
+  /// 获取或创建指定 tab.id 的 GlobalKey
+  GlobalKey<PluginWebViewState> _getWebViewKey(String tabId) {
+    return _webViewKeys.putIfAbsent(tabId, () => GlobalKey<PluginWebViewState>());
   }
 
   /// 切换当前插件 tab 的控制台面板显隐
   void _toggleConsole() {
     final tabManager = context.read<TabManager>();
-    final index = tabManager.currentIndex;
-    final state = _webViewKeys[index]?.currentState;
+    // 使用稳定的 tab.id 而非 index，避免关闭中间 tab 后 index 漂移
+    final tabId = tabManager.currentTab.id;
+    final state = _webViewKeys[tabId]?.currentState;
     if (state != null) {
       setState(() {
         state.consoleManager.toggleVisibility();
@@ -89,21 +91,22 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     
     // 同步当前索引
     if (_tabController!.index != tabManager.currentIndex) {
+      // 捕获当前 controller 引用，在异步回调前检查是否仍是同一个实例
+      // 避免 快速关闭 tab -> controller 重建 -> 尚未调用的 animateTo 在已 dispose controller 上执行
+      final capturedController = _tabController;
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted && _tabController != null) {
+        if (mounted && _tabController == capturedController) {
           _tabController!.animateTo(tabManager.currentIndex);
         }
       });
     }
 
-    // 清理已不再存在的标签页缓存
+    // 清理已不存在的标签页缓存
     final currentTabIds = tabManager.tabs.map((t) => t.id).toSet();
     _tabCache.removeWhere((id, _) => !currentTabIds.contains(id));
     
-    // 清理 webViewKeys (注意：webViewKeys 使用 index 作为键，由于顺序可能变化，这里需要更严谨的处理，
-    // 但在当前代码中 index 是由 build 时的循环产生的，所以清理无效内存即可)
-    final validIndices = List.generate(tabManager.tabs.length, (i) => i).toSet();
-    _webViewKeys.removeWhere((index, _) => !validIndices.contains(index));
+    // 使用 tab.id 清理 webViewKeys（与 _tabCache 保持一致）
+    _webViewKeys.removeWhere((id, _) => !currentTabIds.contains(id));
     
     return _tabController!;
   }
@@ -464,13 +467,10 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   
   /// 构建主内容区域
   Widget _buildBodyContent(BuildContext context, TabManager tabManager) {
-    // 溯流模式下显示溯流视图
     final appModeManager = context.watch<AppModeManager>();
-    if (appModeManager.isStreamMode) {
-      return const StreamView();
-    }
+    final isStreamMode = appModeManager.isStreamMode;
 
-    // 根据当前标签页列表构建 IndexedStack 的 children
+    // 始终构建插件内容，不因模式切换而 dispose WebView
     final children = <Widget>[];
     
     for (int i = 0; i < tabManager.tabs.length; i++) {
@@ -482,7 +482,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
           return const MarketView();
         } else {
           return PluginWebView(
-            key: _getWebViewKey(i),
+            key: _getWebViewKey(tab.id), // 使用稳定的 tab.id
             plugin: tab.plugin!,
           );
         }
@@ -493,7 +493,8 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
 
     // 获取当前插件 tab 的 ConsoleManager
     final currentIndex = tabManager.currentIndex;
-    final currentState = _webViewKeys[currentIndex]?.currentState;
+    final currentTabId = tabManager.currentTab.id;
+    final currentState = _webViewKeys[currentTabId]?.currentState; // 使用 tab.id
     final consoleManager = currentState?.consoleManager;
     final isConsoleVisible = consoleManager?.isVisible ?? false;
 
@@ -503,84 +504,75 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       children: children,
     );
 
-    // 控制台未打开时直接返回主内容
+    // 构建插件内容（含控制台）
+    Widget pluginContent;
     if (!isConsoleVisible || consoleManager == null) {
-      return mainContent;
-    }
-
-    // 控制台面板
-    final consolePanel = ConsolePanel(
-      consoleManager: consoleManager,
-      webViewController: currentState?.webViewController,
-      onClose: () {
-        setState(() {
-          consoleManager.hide();
-        });
-      },
-    );
-
-    final colorScheme = Theme.of(context).colorScheme;
-    final isCompact = ResponsiveHelper.isCompact(context);
-
-    if (isCompact) {
-      // ── 手机：上下分栏，控制台在底部 ──
-      return LayoutBuilder(
-        builder: (context, constraints) {
-          final totalHeight = constraints.maxHeight;
-          final consoleHeight = (totalHeight * _consoleSizeFraction)
-              .clamp(_dividerThickness + 80, totalHeight - 80);
-          final mainHeight = totalHeight - consoleHeight - _dividerThickness;
-
-          return Column(
-            children: [
-              // WebView 区域（挤压）
-              SizedBox(
-                height: mainHeight,
-                child: mainContent,
-              ),
-              // 可拖拽的水平分隔条
-              _buildHorizontalDragHandle(
-                colorScheme, totalHeight,
-              ),
-              // 控制台面板
-              SizedBox(
-                height: consoleHeight,
-                child: consolePanel,
-              ),
-            ],
-          );
-        },
-      );
+      pluginContent = mainContent;
     } else {
-      // ── 桌面/平板：左右分栏，控制台在右侧 ──
-      return LayoutBuilder(
-        builder: (context, constraints) {
-          final totalWidth = constraints.maxWidth;
-          final consoleWidth = (totalWidth * _consoleSizeFraction)
-              .clamp(_dividerThickness + 200, totalWidth - 200);
-          final mainWidth = totalWidth - consoleWidth - _dividerThickness;
-
-          return Row(
-            children: [
-              // WebView 区域（挤压）
-              SizedBox(
-                width: mainWidth,
-                child: mainContent,
-              ),
-              // 可拖拽的垂直分隔条
-              _buildVerticalDragHandle(
-                colorScheme, totalWidth,
-              ),
-              // 控制台面板
-              SizedBox(
-                width: consoleWidth,
-                child: consolePanel,
-              ),
-            ],
-          );
+      // 控制台面板
+      final consolePanel = ConsolePanel(
+        consoleManager: consoleManager,
+        webViewController: currentState?.webViewController,
+        onClose: () {
+          setState(() {
+            consoleManager.hide();
+          });
         },
       );
+
+      final colorScheme = Theme.of(context).colorScheme;
+      final isCompact = ResponsiveHelper.isCompact(context);
+
+      if (isCompact) {
+        // ── 手机：上下分栏，控制台在底部 ──
+        pluginContent = LayoutBuilder(
+          builder: (context, constraints) {
+            final totalHeight = constraints.maxHeight;
+            final consoleHeight = (totalHeight * _consoleSizeFraction)
+                .clamp(_dividerThickness + 80, totalHeight - 80);
+            final mainHeight = totalHeight - consoleHeight - _dividerThickness;
+
+            return Column(
+              children: [
+                SizedBox(height: mainHeight, child: mainContent),
+                _buildHorizontalDragHandle(colorScheme, totalHeight),
+                SizedBox(height: consoleHeight, child: consolePanel),
+              ],
+            );
+          },
+        );
+      } else {
+        // ── 桌面/平板：左右分栏，控制台在右侧 ──
+        pluginContent = LayoutBuilder(
+          builder: (context, constraints) {
+            final totalWidth = constraints.maxWidth;
+            final consoleWidth = (totalWidth * _consoleSizeFraction)
+                .clamp(_dividerThickness + 200, totalWidth - 200);
+            final mainWidth = totalWidth - consoleWidth - _dividerThickness;
+
+            return Row(
+              children: [
+                SizedBox(width: mainWidth, child: mainContent),
+                _buildVerticalDragHandle(colorScheme, totalWidth),
+                SizedBox(width: consoleWidth, child: consolePanel),
+              ],
+            );
+          },
+        );
+      }
     }
+
+    // 使用 Offstage 保留 WebView 状态，切换到溯流模式时不 dispose WebView
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        Offstage(
+          offstage: isStreamMode,
+          child: pluginContent,
+        ),
+        if (isStreamMode) const StreamView(),
+      ],
+    );
   }
 
   /// 水平分隔条（手机底部面板，上下拖拽调节高度）

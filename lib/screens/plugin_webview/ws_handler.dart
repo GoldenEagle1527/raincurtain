@@ -294,10 +294,14 @@ mixin WebSocketMixin {
     if (controller == null || !isMounted()) return;
     final payloadJson = jsonEncode(payload);
     // 使用 JSON.parse 避免字符串中特殊字符问题
-    controller.evaluateJavascript(
-      source:
-          'if(window.__rc_ws_event) window.__rc_ws_event("$instanceId", "$event", JSON.parse(${jsonEncode(payloadJson)}));',
-    );
+    controller
+        .evaluateJavascript(
+          source:
+              'if(window.__rc_ws_event) window.__rc_ws_event("$instanceId", "$event", JSON.parse(${jsonEncode(payloadJson)}));',
+        )
+        .catchError(
+          (e) => debugPrint('[RC WS] evaluateJavascript error: $e'),
+        );
   }
 
   /// 注册 WebSocket Handler

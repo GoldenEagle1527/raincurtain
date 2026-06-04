@@ -13,7 +13,7 @@ import 'models/plugin_manager.dart';
 class PluginApiServer {
   static const int kPort = 19280;
   static const String kApiVersion = '1.0.0';
-  static const String kAppVersion = '1.1.8+2';
+  static const String kAppVersion = '1.1.9+2';
 
   final PluginManager pluginManager;
   HttpServer? _server;
@@ -109,13 +109,13 @@ class PluginApiServer {
       }
 
       // 未匹配的路由
-      _writeError(req.response, HttpStatus.notFound, 'ERROR_NOT_FOUND',
+      await _writeError(req.response, HttpStatus.notFound, 'ERROR_NOT_FOUND',
           'Endpoint not found: ${req.method} $path');
     } catch (e, stackTrace) {
       debugPrint('PluginApiServer unhandled error: $e');
       debugPrintStack(stackTrace: stackTrace);
       try {
-        _writeError(req.response, HttpStatus.internalServerError,
+        await _writeError(req.response, HttpStatus.internalServerError,
             'ERROR_INTERNAL', e.toString());
       } catch (_) {
         // 响应可能已被关闭
@@ -127,7 +127,7 @@ class PluginApiServer {
 
   /// GET /api/health
   Future<void> _handleHealth(HttpRequest req) async {
-    _writeJson(req.response, HttpStatus.ok, {
+    await _writeJson(req.response, HttpStatus.ok, {
       'ok': true,
       'data': {
         'app': 'RainCurtain',
@@ -147,7 +147,7 @@ class PluginApiServer {
       list = list.where((p) => p.manifest.id == manifestId).toList();
     }
 
-    _writeJson(req.response, HttpStatus.ok, {
+    await _writeJson(req.response, HttpStatus.ok, {
       'ok': true,
       'data': {
         'plugins': list.map(_pluginToJson).toList(),
@@ -159,12 +159,12 @@ class PluginApiServer {
   Future<void> _handleGetPlugin(HttpRequest req, String id) async {
     final plugin = pluginManager.getPluginById(id);
     if (plugin == null) {
-      _writeError(req.response, HttpStatus.notFound, 'ERROR_PLUGIN_NOT_FOUND',
+      await _writeError(req.response, HttpStatus.notFound, 'ERROR_PLUGIN_NOT_FOUND',
           'Plugin not found: $id');
       return;
     }
 
-    _writeJson(req.response, HttpStatus.ok, {
+    await _writeJson(req.response, HttpStatus.ok, {
       'ok': true,
       'data': _pluginToJson(plugin),
     });
@@ -196,23 +196,23 @@ class PluginApiServer {
         entryPath: entryPath,
         overwrite: overwrite,
       );
-      _writeJson(req.response, HttpStatus.ok, {
+      await _writeJson(req.response, HttpStatus.ok, {
         'ok': true,
         'data': _pluginToJson(plugin),
       });
     } on Exception catch (e) {
       final msg = e.toString();
       if (msg.contains('插件已存在')) {
-        _writeError(req.response, HttpStatus.conflict, 'ERROR_PLUGIN_EXISTS',
+        await _writeError(req.response, HttpStatus.conflict, 'ERROR_PLUGIN_EXISTS',
             msg);
       } else if (msg.contains('不存在')) {
-        _writeError(req.response, HttpStatus.notFound, 'ERROR_FILE_NOT_FOUND',
+        await _writeError(req.response, HttpStatus.notFound, 'ERROR_FILE_NOT_FOUND',
             msg);
       } else if (msg.contains('manifest') || msg.contains('格式')) {
-        _writeError(req.response, HttpStatus.badRequest,
+        await _writeError(req.response, HttpStatus.badRequest,
             'ERROR_INVALID_MANIFEST', msg);
       } else {
-        _writeError(
+        await _writeError(
             req.response, HttpStatus.internalServerError, 'ERROR_INTERNAL', msg);
       }
     }
@@ -244,20 +244,20 @@ class PluginApiServer {
         zipFile,
         overwrite: overwrite,
       );
-      _writeJson(req.response, HttpStatus.ok, {
+      await _writeJson(req.response, HttpStatus.ok, {
         'ok': true,
         'data': _pluginToJson(plugin),
       });
     } on Exception catch (e) {
       final msg = e.toString();
       if (msg.contains('插件已存在')) {
-        _writeError(req.response, HttpStatus.conflict, 'ERROR_PLUGIN_EXISTS',
+        await _writeError(req.response, HttpStatus.conflict, 'ERROR_PLUGIN_EXISTS',
             msg);
       } else if (msg.contains('manifest') || msg.contains('格式')) {
-        _writeError(req.response, HttpStatus.badRequest,
+        await _writeError(req.response, HttpStatus.badRequest,
             'ERROR_INVALID_MANIFEST', msg);
       } else {
-        _writeError(
+        await _writeError(
             req.response, HttpStatus.internalServerError, 'ERROR_INTERNAL', msg);
       }
     }
@@ -267,19 +267,19 @@ class PluginApiServer {
   Future<void> _handleUninstallPlugin(HttpRequest req, String id) async {
     final plugin = pluginManager.getPluginById(id);
     if (plugin == null) {
-      _writeError(req.response, HttpStatus.notFound, 'ERROR_PLUGIN_NOT_FOUND',
+      await _writeError(req.response, HttpStatus.notFound, 'ERROR_PLUGIN_NOT_FOUND',
           'Plugin not found: $id');
       return;
     }
 
     try {
       await pluginManager.uninstallPlugin(id);
-      _writeJson(req.response, HttpStatus.ok, {
+      await _writeJson(req.response, HttpStatus.ok, {
         'ok': true,
         'data': {'pluginId': id, 'deleted': true},
       });
     } on Exception catch (e) {
-      _writeError(req.response, HttpStatus.internalServerError,
+      await _writeError(req.response, HttpStatus.internalServerError,
           'ERROR_INTERNAL', e.toString());
     }
   }
@@ -289,21 +289,21 @@ class PluginApiServer {
     try {
       final plugin = await pluginManager.reloadPlugin(id);
       if (plugin == null) {
-        _writeError(req.response, HttpStatus.notFound,
+        await _writeError(req.response, HttpStatus.notFound,
             'ERROR_PLUGIN_NOT_FOUND', 'Plugin not found: $id');
         return;
       }
-      _writeJson(req.response, HttpStatus.ok, {
+      await _writeJson(req.response, HttpStatus.ok, {
         'ok': true,
         'data': _pluginToJson(plugin),
       });
     } on Exception catch (e) {
       final msg = e.toString();
       if (msg.contains('manifest') || msg.contains('不存在')) {
-        _writeError(req.response, HttpStatus.badRequest,
+        await _writeError(req.response, HttpStatus.badRequest,
             'ERROR_INVALID_MANIFEST', msg);
       } else {
-        _writeError(
+        await _writeError(
             req.response, HttpStatus.internalServerError, 'ERROR_INTERNAL', msg);
       }
     }
@@ -313,12 +313,12 @@ class PluginApiServer {
   Future<void> _handleReloadAll(HttpRequest req) async {
     try {
       await pluginManager.reloadPlugins();
-      _writeJson(req.response, HttpStatus.ok, {
+      await _writeJson(req.response, HttpStatus.ok, {
         'ok': true,
         'data': {'pluginCount': pluginManager.plugins.length},
       });
     } on Exception catch (e) {
-      _writeError(req.response, HttpStatus.internalServerError,
+      await _writeError(req.response, HttpStatus.internalServerError,
           'ERROR_INTERNAL', e.toString());
     }
   }
@@ -346,19 +346,19 @@ class PluginApiServer {
   }
 
   /// 写入 JSON 响应
-  void _writeJson(
-      HttpResponse response, int status, Map<String, dynamic> body) {
+  Future<void> _writeJson(
+      HttpResponse response, int status, Map<String, dynamic> body) async {
     _setCorsHeaders(response);
     response.statusCode = status;
     response.headers.contentType = ContentType.json;
     response.write(jsonEncode(body));
-    response.close();
+    await response.close();
   }
 
   /// 写入错误响应
-  void _writeError(
+  Future<void> _writeError(
       HttpResponse response, int status, String code, String message) {
-    _writeJson(response, status, {
+    return _writeJson(response, status, {
       'ok': false,
       'error': code,
       'message': message,

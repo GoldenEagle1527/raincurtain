@@ -221,10 +221,14 @@ mixin UdpMixin {
     if (controller == null || !isMounted()) return;
     final payloadJson = jsonEncode(payload);
     // 使用 JSON.parse 避免字符串中特殊字符问题（与 WS 同模式）
-    controller.evaluateJavascript(
-      source:
-          'if(window.__rc_udp_event) window.__rc_udp_event("$instanceId", "$event", JSON.parse(${jsonEncode(payloadJson)}));',
-    );
+    controller
+        .evaluateJavascript(
+          source:
+              'if(window.__rc_udp_event) window.__rc_udp_event("$instanceId", "$event", JSON.parse(${jsonEncode(payloadJson)}));',
+        )
+        .catchError(
+          (e) => debugPrint('[RC UDP] evaluateJavascript error: $e'),
+        );
   }
 
   /// 注册 UDP Handler

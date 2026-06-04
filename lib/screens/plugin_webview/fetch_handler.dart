@@ -971,14 +971,26 @@ mixin FetchMixin {
                 if (!isMounted() || wvc == null) return;
                 totalBytes += chunk.length;
                 final b64 = base64Encode(chunk);
-                wvc.evaluateJavascript(
-                    source: 'if(window["__rc_stream_chunk_$requestId"]) window["__rc_stream_chunk_$requestId"]("$b64");');
+                wvc
+                    .evaluateJavascript(
+                      source:
+                          'if(window["__rc_stream_chunk_$requestId"]) window["__rc_stream_chunk_$requestId"]("$b64");',
+                    )
+                    .catchError(
+                      (e) => debugPrint('[RC Fetch] chunk push error: $e'),
+                    );
               },
               onDone: () {
                 final wvc = getWebViewController();
                 if (isMounted() && wvc != null) {
-                  wvc.evaluateJavascript(
-                      source: 'if(window["__rc_stream_done_$requestId"]) window["__rc_stream_done_$requestId"]();');
+                  wvc
+                      .evaluateJavascript(
+                        source:
+                            'if(window["__rc_stream_done_$requestId"]) window["__rc_stream_done_$requestId"]();',
+                      )
+                      .catchError(
+                        (e) => debugPrint('[RC Fetch] done push error: $e'),
+                      );
                 }
                 metrics.responseSize = totalBytes;
                 metrics.log();
@@ -990,8 +1002,14 @@ mixin FetchMixin {
                 final wvc = getWebViewController();
                 if (isMounted() && wvc != null) {
                   final safeError = jsonEncode(error.toString());
-                  wvc.evaluateJavascript(
-                      source: 'if(window["__rc_stream_error_$requestId"]) window["__rc_stream_error_$requestId"]($safeError);');
+                  wvc
+                      .evaluateJavascript(
+                        source:
+                            'if(window["__rc_stream_error_$requestId"]) window["__rc_stream_error_$requestId"]($safeError);',
+                      )
+                      .catchError(
+                        (e) => debugPrint('[RC Fetch] error push error: $e'),
+                      );
                 }
                 metrics.fail(error.toString());
                 metrics.log();
