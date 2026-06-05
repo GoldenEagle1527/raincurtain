@@ -53,3 +53,7 @@ redist/
 s3_config.json
 
 tools/
+
+# 本地构建脚本（包含敏感操作/凭证调用，不纳入版本控制）
+构建.bat
+*.bak
