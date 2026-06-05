@@ -1,8 +1,10 @@
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
+import 'package:open_file/open_file.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
+import 'package:permission_handler/permission_handler.dart';
 import '../plugin_api_server.dart';
 import '../utils/s3_client.dart';
 import 's3_config_manager.dart';
@@ -171,9 +173,36 @@ class UpdateManager extends ChangeNotifier {
         // Windows：运行外部 EXE 独立安装程序，然后安全退出当前 Flutter 进程
         await Process.start(_localDownloadPath!, [], runInShell: true);
         exit(0);
+      } else if (Platform.isAndroid) {
+        // Android：先确认「安装未知来源应用」权限
+        final canInstall = await Permission.requestInstallPackages.status;
+        if (!canInstall.isGranted) {
+          final result = await Permission.requestInstallPackages.request();
+          if (!result.isGranted) {
+            // 用户拒绝权限——引导去设置
+            debugPrint('[UpdateManager] 「安装未知来源应用」权限被拒绝，将引导用户开启权限');
+            await openAppSettings();
+            // 设置错误状态提示用户需要手动开启权限后再点重试
+            _status = UpdateStatus.error;
+            _errorMessage = '安装需要「安装未知来源应用」权限。\n请在系统设置中开启权限后，返回应用点击重试。';
+            notifyListeners();
+            return;
+          }
+        }
+
+        // 权限已授予，调用系统安装器打开 APK
+        debugPrint('[UpdateManager] 正在调起 APK 安装器：$_localDownloadPath');
+        final openResult = await OpenFile.open(
+          _localDownloadPath!,
+          type: 'application/vnd.android.package-archive',
+        );
+        if (openResult.type != ResultType.done) {
+          _status = UpdateStatus.error;
+          _errorMessage = 'APK 安装器启动失败：${openResult.message}';
+          notifyListeners();
+        }
       } else {
-        // 其他平台 (如 Android) 提示用户在外部进行安装
-        debugPrint('[UpdateManager] 非 Windows 平台，建议引导用户前往文件目录安装');
+        debugPrint('[UpdateManager] 暂不支持当前平台的自动安装');
       }
     } catch (e) {
       _status = UpdateStatus.error;

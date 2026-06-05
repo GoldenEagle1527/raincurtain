@@ -8,7 +8,7 @@ const fs = require("fs");
 const path = require("path");
 
 // ★★★ 在这里修改版本号 ★★★
-const VERSION = "1.2.2";
+const VERSION = "1.2.4";
 const BUILD = 2; // pubspec.yaml 的 build number (+N)
 
 // ========================================

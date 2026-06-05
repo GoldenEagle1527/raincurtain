@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- 对应 getTemporaryDirectory() 返回的路径（通常为 /data/user/0/<pkg>/cache） -->
+    <cache-path name="cache" path="." />
+    <!-- 对应 getExternalStorageDirectory() 等外部存储（兼容旧版路径）-->
+    <external-path name="external" path="." />
+</paths>
