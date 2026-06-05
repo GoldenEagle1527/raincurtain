@@ -1,5 +1,5 @@
 #define MyAppName "雨幕"
-#define MyAppVersion "1.2.4"
+#define MyAppVersion "1.2.5"
 #define MyAppPublisher "GoldenEaglePersonal"
 #define MyAppExeName "raincurtain.exe"
 #define MyAppSourceDir "build\windows\x64\runner\Release"
