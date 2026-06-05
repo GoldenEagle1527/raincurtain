@@ -5,6 +5,7 @@ import 'package:open_file/open_file.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../plugin_api_server.dart';
 import '../utils/s3_client.dart';
 import 's3_config_manager.dart';
@@ -23,6 +24,26 @@ enum UpdateStatus {
 /// 自动更新管理器
 /// 负责从 S3 桶拉取 `update.json`，比对版本信息，并在本地异步下载和触发安装更新。
 class UpdateManager extends ChangeNotifier {
+  UpdateManager() {
+    _clearUpdateDir();
+  }
+
+  /// 启动时检查并清空升级程序存放文件夹
+  Future<void> _clearUpdateDir() async {
+    try {
+      final tempDir = await getTemporaryDirectory();
+      final updateDir = Directory(p.join(tempDir.path, 'RainCurtain-Update'));
+      if (await updateDir.exists()) {
+        await updateDir.delete(recursive: true);
+        debugPrint('[UpdateManager] 成功清空升级程序存放文件夹: ${updateDir.path}');
+      } else {
+        debugPrint('[UpdateManager] 升级程序存放文件夹不存在，无需清理');
+      }
+    } catch (e) {
+      debugPrint('[UpdateManager] 清空升级程序存放文件夹失败: $e');
+    }
+  }
+
   UpdateStatus _status = UpdateStatus.idle;
   String? _errorMessage;
   
@@ -66,6 +87,17 @@ class UpdateManager extends ChangeNotifier {
     notifyListeners();
 
     try {
+      // 检查版本升级并清除历史跳过的版本
+      final prefs = await SharedPreferences.getInstance();
+      final (localVer, localBuild) = getLocalVersionInfo();
+      final currentFullVer = '$localVer+$localBuild';
+      final lastKnownVer = prefs.getString('last_known_local_version');
+      if (lastKnownVer != currentFullVer) {
+        await prefs.remove('skip_update_version');
+        await prefs.setString('last_known_local_version', currentFullVer);
+        debugPrint('[UpdateManager] 检测到应用版本发生变更 ($lastKnownVer -> $currentFullVer)，已清空历史跳过的更新版本');
+      }
+
       final client = S3Client(publicUrl: config.publicUrl);
 
       // 1. 读取 update.json
@@ -84,7 +116,6 @@ class UpdateManager extends ChangeNotifier {
       }
 
       // 2. 比对版本
-      final (localVer, localBuild) = getLocalVersionInfo();
       final hasNew = _hasNewVersion(
         localVer: localVer,
         remoteVer: _latestVersion!,
@@ -208,6 +239,30 @@ class UpdateManager extends ChangeNotifier {
       _status = UpdateStatus.error;
       _errorMessage = '启动安装程序失败: $e';
       notifyListeners();
+    }
+  }
+
+  /// 将当前检测到的最新版本（最新版本号+最新构建号）保存为不再提示的版本
+  Future<void> skipCurrentUpdate() async {
+    if (_latestVersion == null || _latestBuildNumber == null) return;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final skipKey = 'skip_update_version';
+      await prefs.setString(skipKey, '$_latestVersion+$_latestBuildNumber');
+      debugPrint('[UpdateManager] 已设置跳过版本: $_latestVersion+$_latestBuildNumber');
+    } catch (e) {
+      debugPrint('[UpdateManager] 保存跳过版本失败: $e');
+    }
+  }
+
+  /// 检查某版本是否被设置为跳过
+  Future<bool> isUpdateSkipped(String version, int buildNumber) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final skipVer = prefs.getString('skip_update_version');
+      return skipVer == '$version+$buildNumber';
+    } catch (e) {
+      return false;
     }
   }
 

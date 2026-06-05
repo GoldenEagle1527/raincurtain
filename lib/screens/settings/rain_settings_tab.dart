@@ -17,26 +17,25 @@ class RainSettingsTab extends StatefulWidget {
 class _RainSettingsTabState extends State<RainSettingsTab> {
   final TextEditingController _angleController = TextEditingController();
   final GlobalKey _directionPickerKey = GlobalKey();
+  late ThemeProvider _themeProvider;
 
   @override
   void initState() {
     super.initState();
-    final themeProvider = Provider.of<ThemeProvider>(context, listen: false);
-    _angleController.text = themeProvider.rainAngle.round().toString();
-    themeProvider.addListener(_onThemeChanged);
+    _themeProvider = Provider.of<ThemeProvider>(context, listen: false);
+    _angleController.text = _themeProvider.rainAngle.round().toString();
+    _themeProvider.addListener(_onThemeChanged);
   }
 
   @override
   void dispose() {
-    final themeProvider = Provider.of<ThemeProvider>(context, listen: false);
-    themeProvider.removeListener(_onThemeChanged);
+    _themeProvider.removeListener(_onThemeChanged);
     _angleController.dispose();
     super.dispose();
   }
 
   void _onThemeChanged() {
-    final themeProvider = Provider.of<ThemeProvider>(context, listen: false);
-    _angleController.text = themeProvider.rainAngle.round().toString();
+    _angleController.text = _themeProvider.rainAngle.round().toString();
   }
 
   @override

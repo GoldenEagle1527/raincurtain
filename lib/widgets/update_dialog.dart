@@ -200,10 +200,13 @@ void showUpdateDialog(BuildContext context, UpdateManager updateManager, S3Confi
           } else {
             actionsList = [
               TextButton(
-                onPressed: () {
-                  Navigator.pop(dialogContext);
+                onPressed: () async {
+                  await manager.skipCurrentUpdate();
+                  if (context.mounted) {
+                    Navigator.pop(dialogContext);
+                  }
                 },
-                child: const Text('稍后'),
+                child: const Text('本次版本不再提示'),
               ),
               FilledButton(
                 onPressed: () {

@@ -56,7 +56,14 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     if (!mounted) return;
 
     if (updateManager.status == UpdateStatus.hasUpdate) {
-      showUpdateDialog(context, updateManager, config);
+      final isSkipped = await updateManager.isUpdateSkipped(
+        updateManager.latestVersion ?? '',
+        updateManager.latestBuildNumber ?? 0,
+      );
+      if (!mounted) return;
+      if (!isSkipped) {
+        showUpdateDialog(context, updateManager, config);
+      }
     }
   }
 
