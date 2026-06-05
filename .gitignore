@@ -48,3 +48,6 @@ plans/
 # Build artifacts / installers
 dist/
 redist/
+
+# 敏感配置文件（包含 S3/R2 密钥，不能提交到版本控制）
+s3_config.json
