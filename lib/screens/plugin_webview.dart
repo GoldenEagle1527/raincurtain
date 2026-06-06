@@ -300,7 +300,7 @@ class PluginWebViewState extends State<PluginWebView>
           onDownloadStartRequest: (controller, downloadRequest) async {
             await handleDownload(
               context: context,
-              mounted: mounted,
+              isMounted: () => mounted,
               url: downloadRequest.url.toString(),
               controller: controller,
               suggestedFilename: downloadRequest.suggestedFilename,

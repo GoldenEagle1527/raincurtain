@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 
 import 'package:archive/archive_io.dart';
 import 'package:file_picker/file_picker.dart';
@@ -260,7 +261,7 @@ class PluginManager extends ChangeNotifier {
     required bool overwrite,
   }) async {
     final bytes = await zipFile.readAsBytes();
-    final archive = ZipDecoder().decodeBytes(bytes);
+    final archive = await Isolate.run(() => ZipDecoder().decodeBytes(bytes));
 
     final tempDir = Directory(p.join(Directory.systemTemp.path, _uuid.v7()));
     await tempDir.create(recursive: true);
@@ -459,7 +460,7 @@ class PluginManager extends ChangeNotifier {
   /// 从 zip 文件中直接读取 manifest.yml（不解压全部文件到磁盘）
   Future<PluginManifest?> _readManifestFromZip(File zipFile) async {
     final bytes = await zipFile.readAsBytes();
-    final archive = ZipDecoder().decodeBytes(bytes);
+    final archive = await Isolate.run(() => ZipDecoder().decodeBytes(bytes));
 
     for (final file in archive) {
       if (file.isFile && p.basename(file.name) == 'manifest.yml') {

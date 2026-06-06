@@ -620,7 +620,7 @@ mixin FetchMixin {
   /// 支持 data: URI（base64 内联数据）、blob: URI（WebView evaluateJavascript）和普通 http/https URL
   Future<void> handleDownload({
     required BuildContext context,
-    required bool mounted,
+    required bool Function() isMounted,
     required String url,
     InAppWebViewController? controller,
     String? suggestedFilename,
@@ -784,7 +784,7 @@ mixin FetchMixin {
         }
       }
 
-      if (mounted) {
+      if (isMounted()) {
         final displayPath = savedPath.split(Platform.pathSeparator).last;
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -794,7 +794,7 @@ mixin FetchMixin {
         );
       }
     } catch (e) {
-      if (mounted) {
+      if (isMounted()) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text('❌ 保存失败: $e'),
@@ -823,7 +823,7 @@ mixin FetchMixin {
 
         await handleDownload(
           context: context,
-          mounted: isMounted(),
+          isMounted: isMounted,
           url: url,
           controller: controller,
           suggestedFilename: filename.isNotEmpty ? filename : null,

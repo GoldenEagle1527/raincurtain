@@ -42,6 +42,17 @@ class SandboxServer {
         p.join(documentRoot.path, path.substring(1)),
       ); // substring(1) removes leading '/'
 
+      // 路径遍历防御：规范化后校验是否仍在沙箱根目录内
+      final canonicalRoot = p.canonicalize(documentRoot.path);
+      final canonicalFile = p.canonicalize(file.path);
+      if (!p.isWithin(canonicalRoot, canonicalFile) &&
+          canonicalFile != canonicalRoot) {
+        request.response.statusCode = HttpStatus.forbidden;
+        request.response.write('Forbidden');
+        await request.response.close();
+        return;
+      }
+
       if (await file.exists()) {
         final ext = p.extension(file.path).toLowerCase();
         final contentType = _getContentType(ext);

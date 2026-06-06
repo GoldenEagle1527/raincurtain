@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:math';
 import 'dart:typed_data';
 import 'package:pointycastle/export.dart';
@@ -13,6 +14,17 @@ class SelfSignedCertificate {
     required this.certificatePem,
     required this.privateKeyPem,
   });
+
+  /// 异步生成自签证书（在后台 Isolate 中运行，避免阻塞主线程）
+  static Future<SelfSignedCertificate> generateAsync({
+    String commonName = 'RainCurtain WSS',
+    int validDays = 3650,
+  }) async {
+    return Isolate.run(() => generate(
+          commonName: commonName,
+          validDays: validDays,
+        ));
+  }
 
   /// 生成自签证书（RSA 2048, SHA-256, 有效期 10 年）
   static SelfSignedCertificate generate({
@@ -50,8 +62,17 @@ class SelfSignedCertificate {
   }
 
   /// 将证书和私钥写入临时文件，返回路径
-  Future<({String certPath, String keyPath})> writeToTempFiles() async {
-    final tempDir = await Directory.systemTemp.createTemp('rc_tls_');
+  /// 支持可选的 [parentDirectory] 自定义父目录，默认在系统临时目录下创建。
+  Future<({String certPath, String keyPath})> writeToTempFiles({Directory? parentDirectory}) async {
+    final Directory tempDir;
+    if (parentDirectory != null) {
+      if (!await parentDirectory.exists()) {
+        await parentDirectory.create(recursive: true);
+      }
+      tempDir = await parentDirectory.createTemp('rc_tls_');
+    } else {
+      tempDir = await Directory.systemTemp.createTemp('rc_tls_');
+    }
     final certFile = File('${tempDir.path}${Platform.pathSeparator}cert.pem');
     final keyFile = File('${tempDir.path}${Platform.pathSeparator}key.pem');
     await certFile.writeAsString(certificatePem);

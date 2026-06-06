@@ -32,6 +32,19 @@ PluginApiServer? pluginApiServer;
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
+  // 启动前清理上一次运行残留的自签名临时证书目录
+  try {
+    final certsDir = Directory(
+      '${Directory.systemTemp.path}${Platform.pathSeparator}raincurtain_certs',
+    );
+    if (certsDir.existsSync()) {
+      certsDir.deleteSync(recursive: true);
+      debugPrint('[Main] Cleaned up temporary certificates directory.');
+    }
+  } catch (e) {
+    debugPrint('[Main] Failed to clean up temporary certificates: $e');
+  }
+
   // 初始化 SQLite 数据库（必须在各 Manager 之前完成）
   await DatabaseManager.instance.init();
 

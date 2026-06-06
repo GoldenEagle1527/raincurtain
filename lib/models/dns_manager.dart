@@ -430,14 +430,17 @@ class DnsManager {
   /// 发送 UDP 查询并等待响应
   Future<Uint8List> _sendQuery(
       Uint8List query, String server, int port, Duration timeout) async {
-    final socket =
-        await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
+    final ipAddress = InternetAddress.tryParse(server) ?? InternetAddress(server);
+    final bindAddress = ipAddress.type == InternetAddressType.IPv6
+        ? InternetAddress.anyIPv6
+        : InternetAddress.anyIPv4;
+    final socket = await RawDatagramSocket.bind(bindAddress, 0);
     final completer = Completer<Uint8List>();
     Timer? timer;
     StreamSubscription<RawSocketEvent>? subscription;
 
     try {
-      socket.send(query, InternetAddress(server), port);
+      socket.send(query, ipAddress, port);
 
       timer = Timer(timeout, () {
         if (!completer.isCompleted) {

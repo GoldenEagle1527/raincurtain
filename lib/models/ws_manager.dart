@@ -14,11 +14,13 @@ class WsServerInstance {
   final Map<String, int> clientPorts = {};
   int _clientCounter = 0;
   StreamSubscription? _subscription;
+  final String? tempCertDirPath;
 
   WsServerInstance({
     required this.instanceId,
     required this.httpServer,
     required this.port,
+    this.tempCertDirPath,
   });
 
   String nextClientId() => 'cli_${++_clientCounter}';
@@ -52,9 +54,22 @@ class WsManager {
   final Map<String, WsClientInstance> _clients = {};
   int _instanceCounter = 0;
 
+  /// 用于 wss:// 连接的共享 HttpClient（跳过自签名证书验证）
+  /// 懒初始化：仅在首次 wss:// 连接时创建，在 disposeAll 中统一释放
+  HttpClient? _wssHttpClient;
+
+  HttpClient _getOrCreateWssClient() {
+    return _wssHttpClient ??= (HttpClient()
+      ..badCertificateCallback = (cert, host, port) => true);
+  }
+
   /// 资源限制
   static const int maxServers = 5;
   static const int maxClients = 10;
+
+  static final Directory _certsDirectory = Directory(
+    '${Directory.systemTemp.path}${Platform.pathSeparator}raincurtain_certs',
+  );
 
   WsManager({required this.onEvent});
 
@@ -82,10 +97,12 @@ class WsManager {
 
     try {
       HttpServer server;
+      String? tempCertDirPath;
 
       if (useTLS) {
         // 运行时生成自签证书，创建安全服务器
-        final securityContext = await _createSelfSignedContext();
+        final (securityContext, tempDirPath) = await _createSelfSignedContext();
+        tempCertDirPath = tempDirPath;
         server = await HttpServer.bindSecure(host, port, securityContext);
       } else {
         server = await HttpServer.bind(host, port);
@@ -98,6 +115,7 @@ class WsManager {
         instanceId: instanceId,
         httpServer: server,
         port: actualPort,
+        tempCertDirPath: tempCertDirPath,
       );
 
       // 监听 HTTP 升级请求
@@ -311,6 +329,20 @@ class WsManager {
       await server._subscription?.cancel();
       // 关闭 HTTP 服务器
       await server.httpServer.close(force: true);
+
+      // 清理临时证书文件目录
+      if (server.tempCertDirPath != null) {
+        try {
+          final dir = Directory(server.tempCertDirPath!);
+          if (await dir.exists()) {
+            await dir.delete(recursive: true);
+            debugPrint('[WsManager] Temporary certificate directory deleted: ${server.tempCertDirPath}');
+          }
+        } catch (e) {
+          debugPrint('[WsManager] Failed to delete temporary certificate directory: $e');
+        }
+      }
+
       debugPrint('[WsManager] Server closed: $instanceId');
       return null;
     } catch (e) {
@@ -343,17 +375,10 @@ class WsManager {
     }
 
     try {
-      // 对于 wss:// 连接，需要创建允许自签证书的 HttpClient
-      HttpClient? customClient;
-      if (url.startsWith('wss://')) {
-        customClient = HttpClient()
-          ..badCertificateCallback = (cert, host, port) => true;
-      }
-
       final ws = await WebSocket.connect(
         url,
         compression: CompressionOptions.compressionOff,
-        customClient: customClient,
+        customClient: url.startsWith('wss://') ? _getOrCreateWssClient() : null,
       ).timeout(
         const Duration(seconds: 10),
         onTimeout: () => throw TimeoutException('Connection timed out'),
@@ -586,23 +611,29 @@ class WsManager {
         await closeServer(id);
       } catch (_) {}
     }
+
+    // 释放共享的 wss HttpClient
+    _wssHttpClient?.close(force: true);
+    _wssHttpClient = null;
   }
 
   // ==================== TLS 支持 ====================
 
-  /// 生成自签证书并创建 SecurityContext
-  static Future<SecurityContext> _createSelfSignedContext() async {
+  /// 生成自签证书，返回包含 SecurityContext 和临时证书目录路径的元组
+  static Future<(SecurityContext, String)> _createSelfSignedContext() async {
     debugPrint('[WsManager] Generating self-signed certificate...');
-    final cert = SelfSignedCertificate.generate(
+    final cert = await SelfSignedCertificate.generateAsync(
       commonName: 'RainCurtain WebSocket Server',
       validDays: 3650,
     );
-    final paths = await cert.writeToTempFiles();
+    final paths = await cert.writeToTempFiles(parentDirectory: _certsDirectory);
     debugPrint('[WsManager] Certificate written to: ${paths.certPath}');
 
     final context = SecurityContext()
       ..useCertificateChain(paths.certPath)
       ..usePrivateKey(paths.keyPath);
-    return context;
+    
+    final tempDirPath = File(paths.certPath).parent.path;
+    return (context, tempDirPath);
   }
 }

@@ -367,6 +367,7 @@ class _PluginDataDetailsPageState extends State<PluginDataDetailsPage> {
           {'_id': rowId},
         );
         
+        if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('删除成功')),
         );
@@ -375,6 +376,7 @@ class _PluginDataDetailsPageState extends State<PluginDataDetailsPage> {
         await _loadTables(); // 同时刷新左侧统计
         _loadPageData();
       } catch (e) {
+        if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('删除失败: $e')),
         );
@@ -416,6 +418,7 @@ class _PluginDataDetailsPageState extends State<PluginDataDetailsPage> {
         final dataManager = context.read<PluginDataManager>();
         await dataManager.pluginStorageManager.clear(widget.pluginId, tableName);
         
+        if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('已清空表 "$tableName"')),
         );
@@ -427,6 +430,7 @@ class _PluginDataDetailsPageState extends State<PluginDataDetailsPage> {
         await _loadTables();
         _loadPageData();
       } catch (e) {
+        if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('清空失败: $e')),
         );
@@ -464,9 +468,8 @@ class _PluginDataDetailsPageState extends State<PluginDataDetailsPage> {
         orderBy: '_id DESC',
       );
 
-      if (mounted) {
-        Navigator.pop(context); // 关闭加载弹窗
-      }
+      if (!mounted) return;
+      Navigator.pop(context); // 关闭加载弹窗
 
       if (allRows.isEmpty) {
         if (mounted) {
