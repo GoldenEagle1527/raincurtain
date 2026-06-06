@@ -121,6 +121,11 @@ class _RainCurtainAppState extends State<RainCurtainApp> {
       await localhostServer!.start();
       sandboxServerPort = localhostServer!.actualPort;
 
+      // 绑定清理缓存回调，在插件文件被修改/删除前释放 SQLite 文件锁
+      pm.onBeforePluginFileChange = (pluginId) async {
+        await localhostServer?.releaseDatabaseCache(pluginId);
+      };
+
       // 启动插件管理 API 服务器
       pluginApiServer = PluginApiServer(pm);
       final apiStarted = await pluginApiServer!.start();

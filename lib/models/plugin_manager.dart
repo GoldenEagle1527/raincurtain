@@ -1,18 +1,15 @@
 import 'dart:convert';
 import 'dart:io';
-import 'dart:isolate';
 
-import 'package:archive/archive_io.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
-import 'package:uuid/uuid.dart';
+import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:yaml/yaml.dart';
 
 import 'database_manager.dart';
 import 'plugin_manifest.dart';
-import 'plugin_icon.dart';
 import 'plugin_storage_manager.dart';
 
 class LocalPlugin {
@@ -29,16 +26,6 @@ class LocalPlugin {
   String get description => manifest.description;
   String get version => manifest.version;
   String get author => manifest.author;
-
-  // 新增：获取图标绝对路径（仅对 PluginImageIcon 有效）
-  String? get iconAbsolutePath {
-    if (manifest.icon is PluginImageIcon) {
-      final relativePath = (manifest.icon as PluginImageIcon).relativePath;
-      return p.join(entryPath, relativePath);
-    }
-    return null;
-  }
-
 
   Map<String, dynamic> toJson() => {
     'entryPath': entryPath,
@@ -63,7 +50,9 @@ class PluginManager extends ChangeNotifier {
   bool get isInit => _isInit;
 
   late Directory sandboxDir;
-  final Uuid _uuid = const Uuid();
+
+  /// 插件文件即将被修改/删除时的通知回调（例如清理 SandboxServer 的数据库缓存）
+  Future<void> Function(String pluginId)? onBeforePluginFileChange;
 
   PluginManager() {
     _init();
@@ -95,26 +84,66 @@ class PluginManager extends ChangeNotifier {
     }
   }
 
-  Future<void> _loadPlugins() async {
+  Future<void> _loadPlugins({bool force = false}) async {
     final db = DatabaseManager.database;
     final rows = await db.query('plugins', orderBy: 'sort_order ASC');
     final List<LocalPlugin> loaded = [];
 
     for (final row in rows) {
       final entryPath = row['entry_path'] as String;
+      final pluginId = row['plugin_id'] as String;
       if (entryPath.isEmpty) continue;
 
       try {
-        // manifest.yml 与 index.html 在同一目录
-        final entryFile = File(p.join(sandboxDir.path, entryPath));
-        final manifestFile = File(p.join(entryFile.parent.path, 'manifest.yml'));
-
-        if (!await manifestFile.exists()) {
-          debugPrint('manifest.yml not found for entryPath: $entryPath');
+        if (!entryPath.endsWith('.rcplugin')) {
+          debugPrint('Legacy format plugin ignored: $entryPath');
+          await db.delete('plugins', where: 'plugin_id = ?', whereArgs: [pluginId]);
           continue;
         }
 
-        final manifest = await _readManifest(manifestFile);
+        final rcpluginFile = File(p.join(sandboxDir.path, entryPath));
+        if (!await rcpluginFile.exists()) {
+          debugPrint('.rcplugin file not found: $entryPath. Cleaning DB.');
+          await db.delete('plugins', where: 'plugin_id = ?', whereArgs: [pluginId]);
+          continue;
+        }
+
+        PluginManifest? manifest;
+        final manifestJsonStr = force ? null : row['manifest_json'] as String?;
+        if (manifestJsonStr != null && manifestJsonStr.isNotEmpty) {
+          try {
+            manifest = PluginManifest.fromJson(
+              Map<String, dynamic>.from(jsonDecode(manifestJsonStr) as Map),
+            );
+          } catch (e) {
+            debugPrint('Failed to parse cached manifest_json for $pluginId, fallback to file: $e');
+          }
+        }
+
+        if (manifest == null) {
+          Database? pluginDb;
+          try {
+            pluginDb = await databaseFactory.openDatabase(rcpluginFile.path, options: OpenDatabaseOptions(readOnly: true));
+            final results = await pluginDb.query('metadata', columns: ['value'], where: 'key = ?', whereArgs: ['manifest_yaml']);
+            if (results.isEmpty) {
+              throw Exception('manifest_yaml not found in metadata table');
+            }
+            final manifestYaml = results.first['value'] as String;
+            manifest = PluginManifest.fromYamlMap(loadYaml(manifestYaml));
+            // 缓存写回数据库
+            await db.update(
+              'plugins',
+              {'manifest_json': jsonEncode(manifest.toJson())},
+              where: 'plugin_id = ?',
+              whereArgs: [pluginId],
+            );
+          } finally {
+            if (pluginDb != null) {
+              await pluginDb.close();
+            }
+          }
+        }
+
         loaded.add(LocalPlugin(entryPath: entryPath, manifest: manifest));
 
         // 确保插件的存储表存在
@@ -124,6 +153,7 @@ class PluginManager extends ChangeNotifier {
         }
       } catch (err) {
         debugPrint('Failed to load plugin ($entryPath): $err');
+        await db.delete('plugins', where: 'plugin_id = ?', whereArgs: [pluginId]);
       }
     }
 
@@ -132,10 +162,10 @@ class PluginManager extends ChangeNotifier {
 
   /// 重新从磁盘读取并加载插件列表
   /// 同时扫描沙箱目录，发现未注册到数据库的新插件并自动注册
-  Future<void> reloadPlugins() async {
+  Future<void> reloadPlugins({bool force = false}) async {
     try {
       await _scanAndRegisterNewPlugins();
-      await _loadPlugins();
+      await _loadPlugins(force: force);
     } catch (e) {
       debugPrint('reloadPlugins failed: $e');
     }
@@ -155,80 +185,49 @@ class PluginManager extends ChangeNotifier {
     final maxOrderResult = await db.rawQuery('SELECT MAX(sort_order) as max_order FROM plugins');
     int nextOrder = (maxOrderResult.first['max_order'] as int? ?? -1) + 1;
 
-    // 扫描沙箱目录的一级子目录（每个子目录是一个 pluginId）
+    // 扫描沙箱目录
     final entities = await sandboxDir.list().toList();
     for (final entity in entities) {
-      if (entity is! Directory) continue;
+      if (entity is File && entity.path.endsWith('.rcplugin')) {
+        // 发现未注册的 rcplugin 文件
+        final filename = p.basename(entity.path);
+        final pluginId = p.basenameWithoutExtension(entity.path);
+        if (registeredIds.contains(pluginId)) continue;
 
-      final pluginIdDir = entity;
-      final pluginId = p.basename(pluginIdDir.path);
+        try {
+          Database? pluginDb;
+          PluginManifest manifest;
+          try {
+            pluginDb = await databaseFactory.openDatabase(entity.path, options: OpenDatabaseOptions(readOnly: true));
+            final results = await pluginDb.query('metadata', columns: ['value'], where: 'key = ?', whereArgs: ['manifest_yaml']);
+            if (results.isEmpty) {
+              continue;
+            }
+            final manifestYaml = results.first['value'] as String;
+            manifest = PluginManifest.fromYamlMap(loadYaml(manifestYaml));
+          } finally {
+            if (pluginDb != null) {
+              await pluginDb.close();
+            }
+          }
 
-      // 跳过已注册的
-      if (registeredIds.contains(pluginId)) continue;
-
-      // 尝试在此目录下找到 manifest.yml
-      try {
-        final manifestFile = await _findManifestInPluginDir(pluginIdDir);
-        if (manifestFile == null) continue;
-
-        final manifest = await _readManifest(manifestFile);
-        final entryPath = await _findEntryPathInDir(pluginIdDir, pluginId);
-        if (entryPath == null) continue;
-
-        // 注册到数据库
-        await db.insert('plugins', {
-          'plugin_id': manifest.id.isNotEmpty ? manifest.id : pluginId,
-          'entry_path': entryPath,
-          'manifest_json': jsonEncode(manifest.toJson()),
-          'sort_order': nextOrder++,
-        });
-
-        debugPrint('Auto-registered plugin from disk: $pluginId');
-      } catch (e) {
-        debugPrint('Failed to auto-register plugin ($pluginId): $e');
-      }
-    }
-  }
-
-  /// 在插件 ID 目录中查找 manifest.yml（支持直接放在子目录中）
-  Future<File?> _findManifestInPluginDir(Directory pluginIdDir) async {
-    final subEntities = await pluginIdDir.list().toList();
-    for (final sub in subEntities) {
-      if (sub is Directory) {
-        final manifestFile = File(p.join(sub.path, 'manifest.yml'));
-        if (await manifestFile.exists()) {
-          return manifestFile;
+          await db.insert('plugins', {
+            'plugin_id': manifest.id.isNotEmpty ? manifest.id : pluginId,
+            'entry_path': filename,
+            'manifest_json': jsonEncode(manifest.toJson()),
+            'sort_order': nextOrder++,
+          });
+          debugPrint('Auto-registered rcplugin from disk: $pluginId');
+        } catch (e) {
+          debugPrint('Failed to auto-register rcplugin ($pluginId): $e');
         }
       }
-      if (sub is File && p.basename(sub.path) == 'manifest.yml') {
-        return sub;
-      }
     }
-    return null;
-  }
-
-  /// 在插件 ID 目录中查找 entry path（index.html 的相对路径）
-  Future<String?> _findEntryPathInDir(Directory pluginIdDir, String pluginId) async {
-    final subEntities = await pluginIdDir.list().toList();
-    for (final sub in subEntities) {
-      if (sub is Directory) {
-        final subDirName = p.basename(sub.path);
-        final indexFile = File(p.join(sub.path, 'index.html'));
-        if (await indexFile.exists()) {
-          return '$pluginId/$subDirName/index.html';
-        }
-      }
-      if (sub is File && p.basename(sub.path) == 'index.html') {
-        return '$pluginId/index.html';
-      }
-    }
-    return null;
   }
 
   Future<void> _savePlugins() async {
     final db = DatabaseManager.database;
     await db.transaction((txn) async {
-      // 清空后重新插入
       await txn.delete('plugins');
       final batch = txn.batch();
       for (int i = 0; i < _plugins.length; i++) {
@@ -244,7 +243,6 @@ class PluginManager extends ChangeNotifier {
     });
   }
 
-  /// 根据 pluginId 查找已加载的插件
   LocalPlugin? getPluginById(String pluginId) {
     for (final p in _plugins) {
       if (p.id == pluginId) return p;
@@ -252,137 +250,55 @@ class PluginManager extends ChangeNotifier {
     return null;
   }
 
-  /// 从 zip 文件路径安装插件（无 UI 依赖，供 API 和 UI 共用）
-  ///
-  /// [overwrite] 为 true 时覆盖已存在的同 ID 插件，为 false 时抛异常。
-  /// 返回安装成功的 [LocalPlugin]。
-  Future<LocalPlugin> installPluginFromZip(
-    File zipFile, {
+  /// 从 rcplugin 数据库文件安装插件
+  Future<LocalPlugin> installPluginFromRcPlugin(
+    File rcpluginFile, {
     required bool overwrite,
   }) async {
-    final bytes = await zipFile.readAsBytes();
-    final archive = await Isolate.run(() => ZipDecoder().decodeBytes(bytes));
-
-    final tempDir = Directory(p.join(Directory.systemTemp.path, _uuid.v7()));
-    await tempDir.create(recursive: true);
-
+    Database? pluginDb;
+    String manifestYaml;
     try {
-      for (final file in archive) {
-        final filename = file.name;
-        if (file.isFile) {
-          final data = file.content as List<int>;
-          final outFile = File(p.join(tempDir.path, filename));
-          await outFile.create(recursive: true);
-          await outFile.writeAsBytes(data);
-        } else {
-          await Directory(p.join(tempDir.path, filename)).create(recursive: true);
-        }
+      pluginDb = await databaseFactory.openDatabase(rcpluginFile.path, options: OpenDatabaseOptions(readOnly: true));
+      final results = await pluginDb.query('metadata', columns: ['value'], where: 'key = ?', whereArgs: ['manifest_yaml']);
+      if (results.isEmpty) {
+        throw Exception('插件格式无效：缺少 metadata 中的 manifest_yaml');
       }
-
-      final manifestFile = await _findManifestFile(tempDir);
-      if (manifestFile == null) {
-        throw Exception('插件格式无效：缺少 manifest.yml 文件');
+      manifestYaml = results.first['value'] as String;
+    } finally {
+      if (pluginDb != null) {
+        await pluginDb.close();
       }
-
-      final manifest = await _readManifest(manifestFile);
-      final pluginId = manifest.id;
-
-      // 检查是否已存在
-      final existingPlugin = getPluginById(pluginId);
-
-      if (existingPlugin != null) {
-        if (!overwrite) {
-          throw Exception('插件已存在：$pluginId');
-        }
-
-        // 删除旧插件目录
-        final oldPluginDir = Directory(p.join(sandboxDir.path, pluginId));
-        if (await oldPluginDir.exists()) {
-          await oldPluginDir.delete(recursive: true);
-        }
-
-        // 从列表中移除旧插件
-        _plugins.removeWhere((p) => p.id == pluginId);
-      }
-
-      final pluginDir = Directory(p.join(sandboxDir.path, pluginId));
-      await tempDir.rename(pluginDir.path);
-
-      final entryPath = await _findEntryPath(pluginDir, pluginId);
-
-      final newPlugin = LocalPlugin(
-        entryPath: entryPath,
-        manifest: manifest,
-      );
-
-      _plugins.add(newPlugin);
-      await _savePlugins();
-
-      // 创建插件的存储表
-      if (manifest.storage.isNotEmpty) {
-        await PluginStorageManager.instance.ensureTablesForPlugin(
-            manifest.id, manifest.storage);
-      }
-
-      notifyListeners();
-      return newPlugin;
-    } catch (_) {
-      if (await tempDir.exists()) {
-        await tempDir.delete(recursive: true);
-      }
-      rethrow;
-    }
-  }
-
-  /// 注册一个已存在于沙箱目录的插件（开发模式）
-  ///
-  /// 插件目录（或符号链接）必须已存在于 sandboxDir/{pluginId}/ 下。
-  /// [entryPath] 格式为 "{pluginId}/{subdir}/index.html"。
-  /// [overwrite] 为 true 时覆盖已存在的同 ID 插件。
-  /// 返回注册成功的 [LocalPlugin]。
-  Future<LocalPlugin> registerExistingPlugin({
-    required String pluginId,
-    required String entryPath,
-    required bool overwrite,
-  }) async {
-    // 校验 entryPath 对应的文件存在
-    final entryFile = File(p.join(sandboxDir.path, entryPath));
-    if (!await entryFile.exists()) {
-      throw Exception('入口文件不存在：$entryPath');
     }
 
-    // 查找 manifest.yml（与 index.html 同目录）
-    final manifestFile = File(p.join(entryFile.parent.path, 'manifest.yml'));
-    if (!await manifestFile.exists()) {
-      throw Exception('manifest.yml 不存在于入口文件同级目录');
-    }
+    final manifest = PluginManifest.fromYamlMap(loadYaml(manifestYaml));
+    final pluginId = manifest.id;
 
-    final manifest = await _readManifest(manifestFile);
-
-    // 校验 pluginId 与 manifest.id 一致
-    if (manifest.id != pluginId) {
-      throw Exception(
-          'pluginId ($pluginId) 与 manifest.id (${manifest.id}) 不一致');
-    }
-
-    // 检查是否已存在
     final existingPlugin = getPluginById(pluginId);
     if (existingPlugin != null) {
       if (!overwrite) {
         throw Exception('插件已存在：$pluginId');
       }
+
+      await _deletePluginFiles(pluginId);
       _plugins.removeWhere((p) => p.id == pluginId);
     }
 
+    final destFileName = '$pluginId.rcplugin';
+    final destFile = File(p.join(sandboxDir.path, destFileName));
+    
+    if (await destFile.exists()) {
+      await destFile.delete();
+    }
+    await rcpluginFile.copy(destFile.path);
+
     final newPlugin = LocalPlugin(
-      entryPath: entryPath,
+      entryPath: destFileName,
       manifest: manifest,
     );
 
     _plugins.add(newPlugin);
     await _savePlugins();
 
-    // 创建插件的存储表
     if (manifest.storage.isNotEmpty) {
       await PluginStorageManager.instance.ensureTablesForPlugin(
           manifest.id, manifest.storage);
@@ -392,22 +308,22 @@ class PluginManager extends ChangeNotifier {
     return newPlugin;
   }
 
-  /// 重新读取单个插件的 manifest.yml（开发模式热更新）
-  ///
-  /// 返回更新后的 [LocalPlugin]，如果插件不存在返回 null。
+  /// 重新读取单个插件的 manifest.yml（发布模式热更新）
   Future<LocalPlugin?> reloadPlugin(String pluginId) async {
     final idx = _plugins.indexWhere((p) => p.id == pluginId);
     if (idx == -1) return null;
 
-    final oldPlugin = _plugins[idx];
-    final entryFile = File(p.join(sandboxDir.path, oldPlugin.entryPath));
-    final manifestFile = File(p.join(entryFile.parent.path, 'manifest.yml'));
-
-    if (!await manifestFile.exists()) {
-      throw Exception('manifest.yml 不存在：${oldPlugin.entryPath}');
+    if (onBeforePluginFileChange != null) {
+      await onBeforePluginFileChange!(pluginId);
     }
 
-    final manifest = await _readManifest(manifestFile);
+    final oldPlugin = _plugins[idx];
+    final rcpluginFile = File(p.join(sandboxDir.path, oldPlugin.entryPath));
+    final manifest = await _readManifestFromRcPlugin(rcpluginFile);
+    if (manifest == null) {
+      throw Exception('读取 manifest 失败，文件损坏或不可用');
+    }
+
     final updatedPlugin = LocalPlugin(
       entryPath: oldPlugin.entryPath,
       manifest: manifest,
@@ -416,7 +332,6 @@ class PluginManager extends ChangeNotifier {
     _plugins[idx] = updatedPlugin;
     await _savePlugins();
 
-    // 确保存储表同步
     if (manifest.storage.isNotEmpty) {
       await PluginStorageManager.instance.ensureTablesForPlugin(
           manifest.id, manifest.storage);
@@ -431,18 +346,17 @@ class PluginManager extends ChangeNotifier {
   }) async {
     final result = await FilePicker.pickFiles(
       type: FileType.custom,
-      allowedExtensions: ['zip'],
+      allowedExtensions: ['rcplugin'],
     );
 
     if (result == null || result.files.single.path == null) {
       return;
     }
 
-    final zipFile = File(result.files.single.path!);
+    final rcpluginFile = File(result.files.single.path!);
 
-    // 检查是否已存在同 ID 的插件（只从 archive 中读 manifest，不全量解压）
     if (onConflict != null) {
-      final manifest = await _readManifestFromZip(zipFile);
+      final manifest = await _readManifestFromRcPlugin(rcpluginFile);
       if (manifest != null) {
         final existingPlugin = getPluginById(manifest.id);
         if (existingPlugin != null) {
@@ -454,81 +368,27 @@ class PluginManager extends ChangeNotifier {
       }
     }
 
-    await installPluginFromZip(zipFile, overwrite: true);
+    await installPluginFromRcPlugin(rcpluginFile, overwrite: true);
   }
 
-  /// 从 zip 文件中直接读取 manifest.yml（不解压全部文件到磁盘）
-  Future<PluginManifest?> _readManifestFromZip(File zipFile) async {
-    final bytes = await zipFile.readAsBytes();
-    final archive = await Isolate.run(() => ZipDecoder().decodeBytes(bytes));
-
-    for (final file in archive) {
-      if (file.isFile && p.basename(file.name) == 'manifest.yml') {
-        try {
-          final content = utf8.decode(file.content as List<int>);
-          final yaml = loadYaml(content);
-          if (yaml is! YamlMap) continue;
-          return PluginManifest.fromYamlMap(yaml);
-        } catch (_) {
-          continue;
-        }
-      }
-    }
-    return null;
-  }
-
-  Future<File?> _findManifestFile(Directory pluginDir) async {
-    final entities = await pluginDir.list(recursive: false).toList();
-
-    for (final entity in entities) {
-      if (entity is File && p.basename(entity.path) == 'manifest.yml') {
-        return entity;
-      }
-      if (entity is Directory) {
-        final manifestInSubDir = File(p.join(entity.path, 'manifest.yml'));
-        if (await manifestInSubDir.exists()) {
-          return manifestInSubDir;
-        }
-      }
-    }
-
-    return null;
-  }
-
-  Future<PluginManifest> _readManifest(File manifestFile) async {
+  /// 从 rcplugin 文件中读取 manifest.yml
+  Future<PluginManifest?> _readManifestFromRcPlugin(File rcpluginFile) async {
+    Database? pluginDb;
     try {
-      final content = await manifestFile.readAsString();
-      final yaml = loadYaml(content);
-      if (yaml is! YamlMap) {
-        throw const FormatException('manifest.yml 内容必须是对象结构');
+      pluginDb = await databaseFactory.openDatabase(rcpluginFile.path, options: OpenDatabaseOptions(readOnly: true));
+      final results = await pluginDb.query('metadata', columns: ['value'], where: 'key = ?', whereArgs: ['manifest_yaml']);
+      if (results.isEmpty) {
+        return null;
       }
-      return PluginManifest.fromYamlMap(yaml);
-    } on FormatException {
-      rethrow;
-    } catch (e) {
-      throw FormatException('manifest.yml 解析失败：$e');
-    }
-  }
-
-  Future<String> _findEntryPath(Directory pluginDir, String pluginId) async {
-    final entities = await pluginDir.list(recursive: false).toList();
-
-    for (final entity in entities) {
-      if (entity is File && p.basename(entity.path) == 'index.html') {
-        return '$pluginId/index.html';
-      }
-      if (entity is Directory) {
-        final subEntities = await entity.list(recursive: false).toList();
-        for (final subEntity in subEntities) {
-          if (subEntity is File && p.basename(subEntity.path) == 'index.html') {
-            final subDirName = p.basename(entity.path);
-            return '$pluginId/$subDirName/index.html';
-          }
-        }
+      final manifestYaml = results.first['value'] as String;
+      return PluginManifest.fromYamlMap(loadYaml(manifestYaml));
+    } catch (_) {
+      return null;
+    } finally {
+      if (pluginDb != null) {
+        await pluginDb.close();
       }
     }
-
-    throw Exception('插件格式无效：根目录或一级子目录中未找到 index.html');
   }
 
   bool get _isSandboxDirReady {
@@ -539,11 +399,9 @@ class PluginManager extends ChangeNotifier {
     }
   }
 
-  /// 拖拽排序插件列表
-  /// [oldIndex] 和 [newIndex] 来自 ReorderableListView.onReorder
   Future<void> reorderPlugins(int oldIndex, int newIndex) async {
     if (oldIndex < newIndex) {
-      newIndex -= 1; // ReorderableListView 的标准偏移处理
+      newIndex -= 1;
     }
     if (oldIndex < 0 || oldIndex >= _plugins.length ||
         newIndex < 0 || newIndex >= _plugins.length) return;
@@ -553,17 +411,22 @@ class PluginManager extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> uninstallPlugin(String pluginId) async {
-    final pluginDir = Directory(p.join(sandboxDir.path, pluginId));
-    if (await pluginDir.exists()) {
-      await pluginDir.delete(recursive: true);
+  Future<void> _deletePluginFiles(String pluginId) async {
+    if (onBeforePluginFileChange != null) {
+      await onBeforePluginFileChange!(pluginId);
     }
-    // 清理插件的存储表
+    final rcpluginFile = File(p.join(sandboxDir.path, '$pluginId.rcplugin'));
+    if (await rcpluginFile.exists()) {
+      await rcpluginFile.delete();
+    }
+  }
+
+  Future<void> uninstallPlugin(String pluginId) async {
+    await _deletePluginFiles(pluginId);
     await PluginStorageManager.instance.dropTablesForPlugin(pluginId);
 
     _plugins.removeWhere((p) => p.id == pluginId);
     await _savePlugins();
     notifyListeners();
   }
-
 }

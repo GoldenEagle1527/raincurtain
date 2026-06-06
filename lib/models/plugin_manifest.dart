@@ -144,6 +144,7 @@ class PluginManifest {
     required this.description,
     required this.version,
     required this.author,
+    this.tags = const [],
     this.icon = const DefaultIcon(),
     this.inputs = const [],
     this.outputs = const [],
@@ -155,6 +156,7 @@ class PluginManifest {
   final String description;
   final String version;
   final String author;
+  final List<String> tags;
   final PluginIcon icon;
   final List<IODefinition> inputs;
   final List<IODefinition> outputs;
@@ -221,6 +223,7 @@ class PluginManifest {
     'description': description,
     'version': version,
     'author': author,
+    'tags': tags,
     'icon': _iconToString(icon),
     'inputs': inputs.map((e) => e.toJson()).toList(),
     'outputs': outputs.map((e) => e.toJson()).toList(),
@@ -258,12 +261,19 @@ class PluginManifest {
           .toList();
     }
 
+    final tagsList = json['tags'];
+    List<String> tagsDefs = [];
+    if (tagsList != null && tagsList is List) {
+      tagsDefs = tagsList.map((e) => e.toString()).toList();
+    }
+
     final manifest = PluginManifest(
       id: (json['id'] ?? '').toString(),
       name: (json['name'] ?? '').toString(),
       description: (json['description'] ?? '').toString(),
       version: (json['version'] ?? '').toString(),
       author: (json['author'] ?? '').toString(),
+      tags: tagsDefs,
       icon: PluginIcon.parse(json['icon']?.toString()),
       inputs: inputsList
           .map((e) => IODefinition.fromJson(
@@ -311,12 +321,19 @@ class PluginManifest {
           .toList();
     }
 
+    final tagsList = yaml['tags'];
+    List<String> tagsDefs = [];
+    if (tagsList != null && tagsList is List) {
+      tagsDefs = tagsList.map((e) => e.toString()).toList();
+    }
+
     final manifest = PluginManifest(
       id: (yaml['id'] ?? '').toString(),
       name: (yaml['name'] ?? '').toString(),
       description: (yaml['description'] ?? '').toString(),
       version: (yaml['version'] ?? '').toString(),
       author: (yaml['author'] ?? '').toString(),
+      tags: tagsDefs,
       icon: PluginIcon.parse(yaml['icon']?.toString()),
       inputs: inputsList
           .map((e) => IODefinition.fromYaml(e, isInput: true))

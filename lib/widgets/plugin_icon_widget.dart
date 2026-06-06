@@ -1,10 +1,9 @@
-import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
-import 'package:path/path.dart' as p;
 import '../models/plugin_manager.dart';
 import '../models/plugin_icon.dart';
 import '../utils/material_icons_registry.dart';
+import '../main.dart' show sandboxServerPort;
 
 /// 插件图标显示组件
 class PluginIconWidget extends StatelessWidget {
@@ -58,11 +57,6 @@ class PluginIconWidget extends StatelessWidget {
   }
 
   /// 构建 Material Icons 图标
-  ///
-  /// 通过 [MaterialIconsRegistry] 在运行时根据图标名称查找 codePoint，
-  /// 然后用 [Text] + 对应字体族直接渲染字符。
-  /// 这样可以支持 ~2000 个 Material Icons，且不会被 release 模式的
-  /// icon tree-shaker 误删（tree-shaker 仅作用于 [Icon] widget 的字面量码点）。
   Widget _buildMaterialIcon(
     String iconName,
     MaterialIconVariant variant,
@@ -72,7 +66,6 @@ class PluginIconWidget extends StatelessWidget {
     final codePoint = registry.lookup(iconName, variant);
 
     if (codePoint == null) {
-      // 名称在 Material Icons 中不存在 -> 显示首字母缩写作为兜底
       return Center(
         child: FittedBox(
           fit: BoxFit.contain,
@@ -96,21 +89,18 @@ class PluginIconWidget extends StatelessWidget {
       child: Text(
         String.fromCharCode(codePoint),
         textAlign: TextAlign.center,
-        // 必须显式给出 ltr，避免环境无 Directionality 时报错
         textDirection: TextDirection.ltr,
         style: TextStyle(
           fontFamily: fontFamily,
           fontSize: size,
           height: 1.0,
           color: colorScheme.onPrimaryContainer,
-          // 关闭字体回退，确保使用 Material Icons 字体渲染私有码点
           fontFamilyFallback: const <String>[],
         ),
       ),
     );
   }
 
-  /// 获取图标名称的缩写（兜底显示，仅当图标名不存在时使用）
   String _getIconAbbreviation(String iconName) {
     final parts = iconName.split('_');
     if (parts.length == 1) {
@@ -126,8 +116,7 @@ class PluginIconWidget extends StatelessWidget {
     String relativePath,
     ColorScheme colorScheme,
   ) {
-    final absolutePath = p.join(plugin.entryPath, relativePath);
-    final file = File(absolutePath);
+    final imageUrl = 'http://127.0.0.1:$sandboxServerPort/${plugin.id}/$relativePath';
     final lowerPath = relativePath.toLowerCase();
     final isSvg = lowerPath.endsWith('.svg');
 
@@ -138,9 +127,16 @@ class PluginIconWidget extends StatelessWidget {
           width: size,
           height: size,
           child: isSvg
-              ? _buildSvgIcon(file, colorScheme)
-              : Image.file(
-                  file,
+              ? SvgPicture.network(
+                  imageUrl,
+                  width: size,
+                  height: size,
+                  fit: BoxFit.contain,
+                  alignment: Alignment.center,
+                  placeholderBuilder: (_) => _buildDefaultIcon(colorScheme),
+                )
+              : Image.network(
+                  imageUrl,
                   width: size,
                   height: size,
                   fit: BoxFit.contain,
@@ -149,18 +145,6 @@ class PluginIconWidget extends StatelessWidget {
                 ),
         ),
       ),
-    );
-  }
-
-  /// SVG 图标渲染
-  Widget _buildSvgIcon(File file, ColorScheme colorScheme) {
-    return SvgPicture.file(
-      file,
-      width: size,
-      height: size,
-      fit: BoxFit.contain,
-      alignment: Alignment.center,
-      placeholderBuilder: (_) => _buildDefaultIcon(colorScheme),
     );
   }
 }

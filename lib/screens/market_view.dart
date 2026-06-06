@@ -28,12 +28,14 @@ class _MarketViewState extends State<MarketView> {
   // ── 已安装插件状态 ──
   bool _isSearching = false;
   String _searchQuery = '';
+  String _selectedLocalTag = '';
   final TextEditingController _searchController = TextEditingController();
 
   // ── 在线市场状态 ──
   List<MarketPlugin> _marketPlugins = [];
   bool _isLoadingMarket = false;
   String? _marketError;
+  String _selectedMarketTag = '';
 
   bool _isSearchingMarket = false;
   String _searchQueryMarket = '';
@@ -41,9 +43,6 @@ class _MarketViewState extends State<MarketView> {
 
   // 下载进度跟踪：[pluginId-version] -> 进度 0.0 ~ 1.0
   final Map<String, double> _downloadProgress = {};
-
-  // manifest 缓存：[pluginId/version] -> ManifestInfo
-  final Map<String, ManifestInfo> _manifestCache = {};
 
   // 历史版本缓存：[pluginId] -> List<MarketPlugin>（已按 updated_at 降序）
   final Map<String, List<MarketPlugin>> _versionsCache = {};
@@ -90,10 +89,6 @@ class _MarketViewState extends State<MarketView> {
             _marketPlugins =
                 list.map((x) => MarketPlugin.fromJson(x)).toList();
           });
-          // 异步预拉取 manifest 信息
-          for (final plugin in _marketPlugins) {
-            _fetchManifestInfo(plugin);
-          }
         } else {
           throw Exception(jsonMap['error'] ?? '拉取列表失败');
         }
@@ -111,37 +106,7 @@ class _MarketViewState extends State<MarketView> {
     }
   }
 
-  /// 从 manifest_url 异步拉取并缓存 manifest 信息（name/description/author/icon）
-  Future<void> _fetchManifestInfo(MarketPlugin plugin) async {
-    final cacheKey = '${plugin.pluginId}/${plugin.version}';
-    if (_manifestCache.containsKey(cacheKey)) return;
-
-    try {
-      final res = await http
-          .get(Uri.parse(plugin.manifestUrl))
-          .timeout(const Duration(seconds: 10));
-      if (res.statusCode == 200) {
-        final yaml = loadYaml(res.body);
-        if (yaml is YamlMap) {
-          final info = ManifestInfo.fromYaml(yaml);
-          if (mounted) {
-            setState(() {
-              _manifestCache[cacheKey] = info;
-            });
-          }
-        }
-      }
-    } catch (e) {
-      debugPrint('[Market] manifest 拉取失败 ($cacheKey): $e');
-    }
-  }
-
-  /// 获取某个插件的 manifest 缓存（可能为 null，表示还在加载）
-  ManifestInfo? _getManifestInfo(MarketPlugin plugin) {
-    return _manifestCache['${plugin.pluginId}/${plugin.version}'];
-  }
-
-  /// 拉取某插件全部历史版本（带缓存）
+  // 拉取某插件全部历史版本（带缓存）
   Future<void> _fetchPluginVersions(String pluginId,
       {void Function()? onDone}) async {
     if (_versionsCache.containsKey(pluginId)) {
@@ -168,10 +133,6 @@ class _MarketViewState extends State<MarketView> {
             setState(() {
               _versionsCache[pluginId] = list;
             });
-          }
-          // 异步预拉取每个版本的 manifest
-          for (final v in list) {
-            _fetchManifestInfo(v);
           }
         }
       }
@@ -244,11 +205,11 @@ class _MarketViewState extends State<MarketView> {
       // 保存至临时文件
       final tempDir = await getTemporaryDirectory();
       final tempFile =
-          File(p.join(tempDir.path, '${plugin.pluginId}-${plugin.version}.zip'));
+          File(p.join(tempDir.path, '${plugin.pluginId}-${plugin.version}.rcplugin'));
       await tempFile.writeAsBytes(bytes);
 
       // 调用本地一键解压并注册
-      await pluginManager.installPluginFromZip(tempFile, overwrite: true);
+      await pluginManager.installPluginFromRcPlugin(tempFile, overwrite: true);
 
       // 清理临时包
       if (await tempFile.exists()) {
@@ -256,7 +217,7 @@ class _MarketViewState extends State<MarketView> {
       }
 
       final displayName =
-          _getManifestInfo(plugin)?.name ?? plugin.pluginId;
+          plugin.name.isNotEmpty ? plugin.name : plugin.pluginId;
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -269,7 +230,7 @@ class _MarketViewState extends State<MarketView> {
     } catch (e) {
       debugPrint('[Market] 下载安装异常: $e');
       final displayName =
-          _getManifestInfo(plugin)?.name ?? plugin.pluginId;
+          plugin.name.isNotEmpty ? plugin.name : plugin.pluginId;
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -285,13 +246,124 @@ class _MarketViewState extends State<MarketView> {
     }
   }
 
-  /// 根据已安装搜索关键词过滤插件列表
+  /// 根据已安装搜索关键词与标签过滤插件列表
   List<LocalPlugin> _filterPlugins(List<LocalPlugin> plugins) {
-    if (_searchQuery.isEmpty) return plugins;
-    final query = _searchQuery.toLowerCase();
-    return plugins.where((plugin) {
-      return plugin.name.toLowerCase().contains(query);
-    }).toList();
+    var list = plugins;
+    if (_searchQuery.isNotEmpty) {
+      final query = _searchQuery.toLowerCase();
+      list = list.where((plugin) {
+        return plugin.name.toLowerCase().contains(query) ||
+            plugin.id.toLowerCase().contains(query) ||
+            plugin.description.toLowerCase().contains(query) ||
+            plugin.author.toLowerCase().contains(query) ||
+            plugin.manifest.tags.any((t) => t.toLowerCase().contains(query));
+      }).toList();
+    }
+    if (_selectedLocalTag.isNotEmpty) {
+      list = list.where((plugin) => plugin.manifest.tags.contains(_selectedLocalTag)).toList();
+    }
+    return list;
+  }
+
+  /// 构建胶囊标签 Badge
+  Widget _buildTagBadge(BuildContext context, String tag, ColorScheme colorScheme) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: colorScheme.secondaryContainer.withValues(alpha: 0.6),
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: Text(
+        tag,
+        style: TextStyle(
+          fontSize: 10,
+          color: colorScheme.onSecondaryContainer,
+          fontWeight: FontWeight.w500,
+        ),
+      ),
+    );
+  }
+
+  /// 构建已安装插件标签筛选横栏
+  Widget _buildLocalTagsFilter(BuildContext context, List<LocalPlugin> plugins, ColorScheme colorScheme) {
+    final tags = plugins.expand((p) => p.manifest.tags).toSet().toList();
+    if (tags.isEmpty) return const SizedBox.shrink();
+
+    return Container(
+      height: 38,
+      margin: const EdgeInsets.only(bottom: 8),
+      child: ListView(
+        scrollDirection: Axis.horizontal,
+        children: [
+          FilterChip(
+            label: const Text('全部'),
+            selected: _selectedLocalTag.isEmpty,
+            onSelected: (selected) {
+              setState(() {
+                _selectedLocalTag = '';
+              });
+            },
+          ),
+          const SizedBox(width: 8),
+          ...tags.map((tag) {
+            final isSelected = _selectedLocalTag == tag;
+            return Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: FilterChip(
+                label: Text(tag),
+                selected: isSelected,
+                onSelected: (selected) {
+                  setState(() {
+                    _selectedLocalTag = selected ? tag : '';
+                  });
+                },
+              ),
+            );
+          }),
+        ],
+      ),
+    );
+  }
+
+  /// 构建在线市场标签筛选横栏
+  Widget _buildMarketTagsFilter(BuildContext context, List<MarketPlugin> plugins, ColorScheme colorScheme) {
+    final tags = plugins.expand((p) => p.tags).toSet().toList();
+    if (tags.isEmpty) return const SizedBox.shrink();
+
+    return Container(
+      height: 38,
+      margin: const EdgeInsets.only(bottom: 8),
+      child: ListView(
+        scrollDirection: Axis.horizontal,
+        children: [
+          FilterChip(
+            label: const Text('全部'),
+            selected: _selectedMarketTag.isEmpty,
+            onSelected: (selected) {
+              setState(() {
+                _selectedMarketTag = '';
+              });
+            },
+          ),
+          const SizedBox(width: 8),
+          ...tags.map((tag) {
+            final isSelected = _selectedMarketTag == tag;
+            return Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: FilterChip(
+                label: Text(tag),
+                selected: isSelected,
+                onSelected: (selected) {
+                  setState(() {
+                    _selectedMarketTag = selected ? tag : '';
+                  });
+                },
+              ),
+            );
+          }),
+        ],
+      ),
+    );
   }
 
   @override
@@ -338,6 +410,63 @@ class _MarketViewState extends State<MarketView> {
     );
   }
 
+  void _showRefreshMenu(BuildContext context, Offset position, PluginManager pluginManager) {
+    final RenderBox overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
+    showMenu(
+      context: context,
+      position: RelativeRect.fromRect(
+        Rect.fromPoints(position, position),
+        Offset.zero & overlay.size,
+      ),
+      items: [
+        const PopupMenuItem(
+          value: 'normal',
+          child: Row(
+            children: [
+              Icon(Icons.refresh, size: 18),
+              SizedBox(width: 8),
+              Text('普通刷新 (读取缓存)'),
+            ],
+          ),
+        ),
+        const PopupMenuItem(
+          value: 'force',
+          child: Row(
+            children: [
+              Icon(Icons.rotate_right, size: 18),
+              SizedBox(width: 8),
+              Text('强制刷新 (重新扫描磁盘)'),
+            ],
+          ),
+        ),
+      ],
+    ).then((value) {
+      if (value == 'normal') {
+        pluginManager.reloadPlugins();
+      } else if (value == 'force') {
+        _forceReload(context, pluginManager);
+      }
+    });
+  }
+
+  Future<void> _forceReload(BuildContext context, PluginManager pluginManager) async {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('正在强制重新扫描磁盘并加载插件元数据...'),
+        duration: Duration(milliseconds: 800),
+      ),
+    );
+    await pluginManager.reloadPlugins(force: true);
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: const Text('强制刷新元数据完成！'),
+          backgroundColor: Theme.of(context).colorScheme.primary,
+        ),
+      );
+    }
+  }
+
   /// 构建双 Tab 顶部标题与动作行
   Widget _buildTabsHeader(
     BuildContext context,
@@ -362,17 +491,31 @@ class _MarketViewState extends State<MarketView> {
         // 智能刷新动作
         Builder(
           builder: (context) {
-            return IconButton(
-              icon: const Icon(Icons.refresh),
-              tooltip: '刷新列表',
-              onPressed: () {
+            return GestureDetector(
+              onLongPressStart: (details) {
                 final tabController = DefaultTabController.of(context);
                 if (tabController.index == 0) {
-                  pluginManager.reloadPlugins();
-                } else {
-                  _fetchMarketPlugins(_searchQueryMarket);
+                  _showRefreshMenu(context, details.globalPosition, pluginManager);
                 }
               },
+              onSecondaryTapDown: (details) {
+                final tabController = DefaultTabController.of(context);
+                if (tabController.index == 0) {
+                  _showRefreshMenu(context, details.globalPosition, pluginManager);
+                }
+              },
+              child: IconButton(
+                icon: const Icon(Icons.refresh),
+                tooltip: '刷新列表 (长按/右键可强制重载)',
+                onPressed: () {
+                  final tabController = DefaultTabController.of(context);
+                  if (tabController.index == 0) {
+                    pluginManager.reloadPlugins();
+                  } else {
+                    _fetchMarketPlugins(_searchQueryMarket);
+                  }
+                },
+              ),
             );
           },
         ),
@@ -421,6 +564,8 @@ class _MarketViewState extends State<MarketView> {
           const SizedBox(height: 8),
           _buildSearchBar(context, colorScheme),
         ],
+        const SizedBox(height: 8),
+        _buildLocalTagsFilter(context, plugins, colorScheme),
         const SizedBox(height: 12),
         Expanded(
           child: filteredPlugins.isEmpty
@@ -438,6 +583,10 @@ class _MarketViewState extends State<MarketView> {
     ColorScheme colorScheme,
     double padding,
   ) {
+    final filteredMarket = _selectedMarketTag.isEmpty
+        ? _marketPlugins
+        : _marketPlugins.where((p) => p.tags.contains(_selectedMarketTag)).toList();
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -472,16 +621,18 @@ class _MarketViewState extends State<MarketView> {
           const SizedBox(height: 8),
           _buildOnlineSearchBar(context, colorScheme),
         ],
+        const SizedBox(height: 8),
+        _buildMarketTagsFilter(context, _marketPlugins, colorScheme),
         const SizedBox(height: 12),
         Expanded(
           child: _isLoadingMarket
               ? const Center(child: CircularProgressIndicator())
               : _marketError != null
                   ? _buildMarketErrorState(context)
-                  : _marketPlugins.isEmpty
+                  : filteredMarket.isEmpty
                       ? _buildOnlineEmptyState(context)
                       : _buildOnlineGrid(
-                          context, _marketPlugins, pluginManager, colorScheme),
+                          context, filteredMarket, pluginManager, colorScheme),
         ),
       ],
     );
@@ -597,28 +748,27 @@ class _MarketViewState extends State<MarketView> {
   /// 构建本地空状态
   Widget _buildEmptyState(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
+    final hasFilter = _searchQuery.isNotEmpty || _selectedLocalTag.isNotEmpty;
 
     return Center(
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
           Icon(
-            _searchQuery.isNotEmpty
-                ? Icons.search_off
-                : Icons.inbox_outlined,
+            hasFilter ? Icons.search_off : Icons.inbox_outlined,
             size: 64,
             color: colorScheme.onSurfaceVariant.withValues(alpha: 0.5),
           ),
           const SizedBox(height: 16),
           Text(
-            _searchQuery.isNotEmpty ? '未找到匹配的插件' : '暂无已安装的插件',
+            hasFilter ? '未找到匹配的插件' : '暂无已安装的插件',
             style: Theme.of(context).textTheme.bodyLarge?.copyWith(
               color: colorScheme.onSurfaceVariant,
             ),
           ),
           const SizedBox(height: 8),
           Text(
-            _searchQuery.isNotEmpty ? '尝试使用其他关键词搜索' : '点击右下角按钮安装新插件',
+            hasFilter ? '尝试使用其他关键词或标签筛选' : '点击右下角按钮安装新插件',
             style: Theme.of(context).textTheme.bodyMedium?.copyWith(
               color: colorScheme.onSurfaceVariant.withValues(alpha: 0.7),
             ),
@@ -631,29 +781,27 @@ class _MarketViewState extends State<MarketView> {
   /// 构建在线空状态
   Widget _buildOnlineEmptyState(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
+    final hasFilter = _searchQueryMarket.isNotEmpty || _selectedMarketTag.isNotEmpty;
+
     return Center(
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
           Icon(
-            _searchQueryMarket.isNotEmpty
-                ? Icons.search_off
-                : Icons.cloud_queue_outlined,
+            hasFilter ? Icons.search_off : Icons.cloud_queue_outlined,
             size: 64,
             color: colorScheme.onSurfaceVariant.withValues(alpha: 0.5),
           ),
           const SizedBox(height: 16),
           Text(
-            _searchQueryMarket.isNotEmpty
-                ? '未找到符合条件的在线插件'
-                : '在线插件市场暂无内容',
+            hasFilter ? '未找到符合条件的在线插件' : '在线插件市场暂无内容',
             style: Theme.of(context).textTheme.bodyLarge?.copyWith(
               color: colorScheme.onSurfaceVariant,
             ),
           ),
           const SizedBox(height: 8),
           Text(
-            _searchQueryMarket.isNotEmpty ? '尝试更换搜索词重新查询' : '点击右上角刷新，或稍后再试',
+            hasFilter ? '尝试更换搜索词或标签重新查询' : '点击右上角刷新，或稍后再试',
             style: Theme.of(context).textTheme.bodyMedium?.copyWith(
               color: colorScheme.onSurfaceVariant.withValues(alpha: 0.7),
             ),
@@ -804,6 +952,17 @@ class _MarketViewState extends State<MarketView> {
                       ),
                     ],
                   ),
+                  if (plugin.manifest.tags.isNotEmpty) ...[
+                    const SizedBox(height: 6),
+                    Wrap(
+                      spacing: 4,
+                      runSpacing: 4,
+                      children: plugin.manifest.tags
+                          .take(3)
+                          .map((t) => _buildTagBadge(context, t, colorScheme))
+                          .toList(),
+                    ),
+                  ],
                   const Spacer(),
                   Text(
                     'v${plugin.version} · ${plugin.author}',
@@ -840,40 +999,70 @@ class _MarketViewState extends State<MarketView> {
     );
   }
 
-  /// 桌面端在线卡片 (采用相同风格，带状态指示动作按钮)
+  /// 桌面端在线卡片 (采用与已安装一致的风格，右上角带状态/下载动作与历史版本按钮)
   Widget _buildOnlineDesktopCard(
     BuildContext context,
     MarketPlugin plugin,
     PluginManager pluginManager,
     ColorScheme colorScheme,
   ) {
-    final manifestInfo = _getManifestInfo(plugin);
     // 用 plugin_id（UUID）匹配本地已安装插件
     final local = pluginManager.getPluginById(plugin.pluginId);
     final progressKey = '${plugin.pluginId}-${plugin.version}';
     final isDownloading = _downloadProgress.containsKey(progressKey);
 
-    final displayName = manifestInfo?.name ?? plugin.pluginId;
-    final displayDesc = manifestInfo?.description ?? '正在加载插件信息...';
+    final displayName = plugin.name.isNotEmpty ? plugin.name : plugin.pluginId;
+    final displayDesc = plugin.description.isNotEmpty ? plugin.description : '暂无功能描述';
+    final displayIcon = plugin.icon;
+    final displayTags = plugin.tags;
 
-    Widget actionIcon;
-    if (isDownloading) {
-      final progress = _downloadProgress[progressKey] ?? 0.0;
-      actionIcon = SizedBox(
-        width: 14,
-        height: 14,
-        child: CircularProgressIndicator(
-          value: progress > 0 ? progress : null,
-          strokeWidth: 2,
-        ),
-      );
-    } else if (local == null) {
-      actionIcon = Icon(Icons.download, size: 14, color: colorScheme.primary);
-    } else if (local.version != plugin.version) {
-      actionIcon =
-          Icon(Icons.system_update_alt, size: 14, color: colorScheme.secondary);
-    } else {
-      actionIcon = const Icon(Icons.check, size: 14, color: Colors.green);
+    // 状态动作按钮
+    Widget buildActionWidget() {
+      if (isDownloading) {
+        final progress = _downloadProgress[progressKey] ?? 0.0;
+        return SizedBox(
+          width: 24,
+          height: 24,
+          child: Center(
+            child: SizedBox(
+              width: 14,
+              height: 14,
+              child: CircularProgressIndicator(
+                value: progress > 0 ? progress : null,
+                strokeWidth: 2,
+              ),
+            ),
+          ),
+        );
+      } else if (local == null) {
+        return SizedBox(
+          width: 24,
+          height: 24,
+          child: IconButton(
+            icon: Icon(Icons.download, size: 14, color: colorScheme.primary),
+            padding: EdgeInsets.zero,
+            onPressed: () => _downloadAndInstall(plugin, pluginManager),
+            tooltip: '安装',
+          ),
+        );
+      } else if (local.version != plugin.version) {
+        return SizedBox(
+          width: 24,
+          height: 24,
+          child: IconButton(
+            icon: Icon(Icons.system_update_alt, size: 14, color: colorScheme.secondary),
+            padding: EdgeInsets.zero,
+            onPressed: () => _downloadAndInstall(plugin, pluginManager),
+            tooltip: '更新',
+          ),
+        );
+      } else {
+        return const SizedBox(
+          width: 24,
+          height: 24,
+          child: Icon(Icons.check, size: 14, color: Colors.green),
+        );
+      }
     }
 
     return Card(
@@ -890,7 +1079,7 @@ class _MarketViewState extends State<MarketView> {
         onTap: isDownloading
             ? null
             : () => _showOnlineDetailDialog(
-                context, plugin, pluginManager, local, manifestInfo),
+                context, plugin, pluginManager, local),
         child: Stack(
           children: [
             Padding(
@@ -902,7 +1091,7 @@ class _MarketViewState extends State<MarketView> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       MarketPluginIconWidget(
-                          iconString: manifestInfo?.icon, name: displayName),
+                          iconString: displayIcon, name: displayName),
                       const SizedBox(width: 8),
                       Expanded(
                         child: Column(
@@ -939,6 +1128,17 @@ class _MarketViewState extends State<MarketView> {
                       ),
                     ],
                   ),
+                  if (displayTags.isNotEmpty) ...[
+                    const SizedBox(height: 6),
+                    Wrap(
+                      spacing: 4,
+                      runSpacing: 4,
+                      children: displayTags
+                          .take(3)
+                          .map((t) => _buildTagBadge(context, t, colorScheme))
+                          .toList(),
+                    ),
+                  ],
                   const Spacer(),
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -956,10 +1156,10 @@ class _MarketViewState extends State<MarketView> {
                       if (isDownloading)
                         Text(
                           '下载中: ${(_downloadProgress[progressKey]! * 100).toStringAsFixed(0)}%',
-                          style:
-                              Theme.of(context).textTheme.labelSmall?.copyWith(
+                          style: Theme.of(context).textTheme.labelSmall?.copyWith(
                             color: colorScheme.primary,
                             fontWeight: FontWeight.bold,
+                            height: 1.0,
                           ),
                         ),
                     ],
@@ -968,16 +1168,26 @@ class _MarketViewState extends State<MarketView> {
               ),
             ),
             Positioned(
-              top: 8,
-              right: 8,
-              child: Container(
-                padding: const EdgeInsets.all(4),
-                decoration: BoxDecoration(
-                  color: colorScheme.surfaceContainerHighest
-                      .withValues(alpha: 0.5),
-                  borderRadius: BorderRadius.circular(4),
-                ),
-                child: actionIcon,
+              top: 4,
+              right: 4,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  buildActionWidget(),
+                  const SizedBox(width: 2),
+                  SizedBox(
+                    width: 24,
+                    height: 24,
+                    child: IconButton(
+                      icon: const Icon(Icons.history, size: 14),
+                      color: colorScheme.onSurfaceVariant,
+                      padding: EdgeInsets.zero,
+                      onPressed: () => _showOnlineDetailDialog(
+                          context, plugin, pluginManager, local),
+                      tooltip: '历史版本',
+                    ),
+                  ),
+                ],
               ),
             ),
           ],
@@ -1040,6 +1250,17 @@ class _MarketViewState extends State<MarketView> {
                         height: 1.2,
                       ),
                     ),
+                    if (plugin.manifest.tags.isNotEmpty) ...[
+                      const SizedBox(height: 4),
+                      Wrap(
+                        spacing: 4,
+                        runSpacing: 4,
+                        children: plugin.manifest.tags
+                            .take(2)
+                            .map((t) => _buildTagBadge(context, t, colorScheme))
+                            .toList(),
+                      ),
+                    ],
                   ],
                 ),
               ),
@@ -1063,39 +1284,69 @@ class _MarketViewState extends State<MarketView> {
     );
   }
 
-  /// 手机端在线卡片 (采用相同风格)
+  /// 手机端在线卡片 (采用与已安装一致的风格)
   Widget _buildOnlineCompactCard(
     BuildContext context,
     MarketPlugin plugin,
     PluginManager pluginManager,
     ColorScheme colorScheme,
   ) {
-    final manifestInfo = _getManifestInfo(plugin);
     final local = pluginManager.getPluginById(plugin.pluginId);
     final progressKey = '${plugin.pluginId}-${plugin.version}';
     final isDownloading = _downloadProgress.containsKey(progressKey);
 
-    final displayName = manifestInfo?.name ?? plugin.pluginId;
-    final displayDesc = manifestInfo?.description ?? '正在加载插件信息...';
+    final displayName = plugin.name.isNotEmpty ? plugin.name : plugin.pluginId;
+    final displayDesc = plugin.description.isNotEmpty ? plugin.description : '暂无功能描述';
+    final displayIcon = plugin.icon;
+    final displayTags = plugin.tags;
 
-    Widget actionIcon;
-    if (isDownloading) {
-      final progress = _downloadProgress[progressKey] ?? 0.0;
-      actionIcon = SizedBox(
-        width: 14,
-        height: 14,
-        child: CircularProgressIndicator(
-          value: progress > 0 ? progress : null,
-          strokeWidth: 2,
-        ),
-      );
-    } else if (local == null) {
-      actionIcon = Icon(Icons.download, size: 14, color: colorScheme.primary);
-    } else if (local.version != plugin.version) {
-      actionIcon =
-          Icon(Icons.system_update_alt, size: 14, color: colorScheme.secondary);
-    } else {
-      actionIcon = const Icon(Icons.check, size: 14, color: Colors.green);
+    // 状态动作按钮
+    Widget buildActionWidget() {
+      if (isDownloading) {
+        final progress = _downloadProgress[progressKey] ?? 0.0;
+        return SizedBox(
+          width: 24,
+          height: 24,
+          child: Center(
+            child: SizedBox(
+              width: 14,
+              height: 14,
+              child: CircularProgressIndicator(
+                value: progress > 0 ? progress : null,
+                strokeWidth: 2,
+              ),
+            ),
+          ),
+        );
+      } else if (local == null) {
+        return SizedBox(
+          width: 24,
+          height: 24,
+          child: IconButton(
+            icon: Icon(Icons.download, size: 14, color: colorScheme.primary),
+            padding: EdgeInsets.zero,
+            onPressed: () => _downloadAndInstall(plugin, pluginManager),
+            tooltip: '安装',
+          ),
+        );
+      } else if (local.version != plugin.version) {
+        return SizedBox(
+          width: 24,
+          height: 24,
+          child: IconButton(
+            icon: Icon(Icons.system_update_alt, size: 14, color: colorScheme.secondary),
+            padding: EdgeInsets.zero,
+            onPressed: () => _downloadAndInstall(plugin, pluginManager),
+            tooltip: '更新',
+          ),
+        );
+      } else {
+        return const SizedBox(
+          width: 24,
+          height: 24,
+          child: Icon(Icons.check, size: 14, color: Colors.green),
+        );
+      }
     }
 
     return Card(
@@ -1112,14 +1363,14 @@ class _MarketViewState extends State<MarketView> {
         onTap: isDownloading
             ? null
             : () => _showOnlineDetailDialog(
-                context, plugin, pluginManager, local, manifestInfo),
+                context, plugin, pluginManager, local),
         child: Padding(
           padding: const EdgeInsets.all(10),
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
               MarketPluginIconWidget(
-                  iconString: manifestInfo?.icon, name: displayName),
+                  iconString: displayIcon, name: displayName),
               const SizedBox(width: 10),
               Expanded(
                 child: Column(
@@ -1146,28 +1397,49 @@ class _MarketViewState extends State<MarketView> {
                         height: 1.2,
                       ),
                     ),
+                    if (displayTags.isNotEmpty) ...[
+                      const SizedBox(height: 4),
+                      Wrap(
+                        spacing: 4,
+                        runSpacing: 4,
+                        children: displayTags
+                            .take(2)
+                            .map((t) => _buildTagBadge(context, t, colorScheme))
+                            .toList(),
+                      ),
+                    ],
                   ],
                 ),
               ),
               const SizedBox(width: 4),
-              if (isDownloading) ...[
-                Text(
-                  '${(_downloadProgress[progressKey]! * 100).toStringAsFixed(0)}%',
-                  style: TextStyle(
-                      fontSize: 11,
-                      color: colorScheme.primary,
-                      fontWeight: FontWeight.bold),
-                ),
-                const SizedBox(width: 4),
-              ],
-              Container(
-                padding: const EdgeInsets.all(4),
-                decoration: BoxDecoration(
-                  color: colorScheme.surfaceContainerHighest
-                      .withValues(alpha: 0.5),
-                  borderRadius: BorderRadius.circular(4),
-                ),
-                child: actionIcon,
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (isDownloading) ...[
+                    Text(
+                      '${(_downloadProgress[progressKey]! * 100).toStringAsFixed(0)}%',
+                      style: TextStyle(
+                          fontSize: 11,
+                          color: colorScheme.primary,
+                          fontWeight: FontWeight.bold),
+                    ),
+                    const SizedBox(width: 4),
+                  ],
+                  buildActionWidget(),
+                  const SizedBox(width: 2),
+                  SizedBox(
+                    width: 24,
+                    height: 24,
+                    child: IconButton(
+                      icon: const Icon(Icons.history, size: 14),
+                      color: colorScheme.onSurfaceVariant,
+                      padding: EdgeInsets.zero,
+                      onPressed: () => _showOnlineDetailDialog(
+                          context, plugin, pluginManager, local),
+                      tooltip: '历史版本',
+                    ),
+                  ),
+                ],
               ),
             ],
           ),
@@ -1182,12 +1454,12 @@ class _MarketViewState extends State<MarketView> {
     MarketPlugin plugin,
     PluginManager pluginManager,
     LocalPlugin? local,
-    ManifestInfo? manifestInfo,
   ) {
     final colorScheme = Theme.of(context).colorScheme;
-    final displayName = manifestInfo?.name ?? plugin.pluginId;
-    final displayDesc = manifestInfo?.description ?? '暂无描述信息。';
-    final displayAuthor = manifestInfo?.author ?? '';
+    final displayName = plugin.name.isNotEmpty ? plugin.name : plugin.pluginId;
+    final displayDesc = plugin.description.isNotEmpty ? plugin.description : '暂无功能描述。';
+    final displayIcon = plugin.icon;
+    final displayTags = plugin.tags;
 
     // 触发预拉取历史版本（若尚未缓存）
     _fetchPluginVersions(plugin.pluginId);
@@ -1341,26 +1613,26 @@ class _MarketViewState extends State<MarketView> {
                             contentPadding: const EdgeInsets.symmetric(
                                 horizontal: 12, vertical: 0),
                             leading: Container(
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 6, vertical: 2),
-                              decoration: BoxDecoration(
-                                color: isInstalled
-                                    ? Colors.green.withValues(alpha: 0.15)
-                                    : colorScheme.primaryContainer
-                                        .withValues(alpha: 0.4),
-                                borderRadius: BorderRadius.circular(4),
-                              ),
-                              child: Text(
-                                'v${v.version}',
-                                style: TextStyle(
-                                  fontSize: 11,
-                                  fontWeight: FontWeight.w600,
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 6, vertical: 2),
+                                decoration: BoxDecoration(
                                   color: isInstalled
-                                      ? Colors.green
-                                      : colorScheme.primary,
+                                      ? Colors.green.withValues(alpha: 0.15)
+                                      : colorScheme.primaryContainer
+                                          .withValues(alpha: 0.4),
+                                  borderRadius: BorderRadius.circular(4),
+                                ),
+                                child: Text(
+                                  'v${v.version}',
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w600,
+                                    color: isInstalled
+                                        ? Colors.green
+                                        : colorScheme.primary,
+                                  ),
                                 ),
                               ),
-                            ),
                             title: Text(
                               v.updatedAt.length >= 10
                                   ? v.updatedAt.substring(0, 10)
@@ -1398,7 +1670,7 @@ class _MarketViewState extends State<MarketView> {
                                 : isInstalled
                                     ? Tooltip(
                                         message: '当前已安装',
-                                        child: Icon(Icons.check_circle,
+                                        child: const Icon(Icons.check_circle,
                                             size: 16,
                                             color: Colors.green),
                                       )
@@ -1435,7 +1707,7 @@ class _MarketViewState extends State<MarketView> {
               title: Row(
                 children: [
                   MarketPluginIconWidget(
-                      iconString: manifestInfo?.icon,
+                      iconString: displayIcon,
                       name: displayName,
                       size: 40),
                   const SizedBox(width: 12),
@@ -1494,15 +1766,19 @@ class _MarketViewState extends State<MarketView> {
                         ),
                       ),
                     ),
-                    const SizedBox(height: 12),
-                    if (displayAuthor.isNotEmpty)
-                      Text(
-                        '作者: $displayAuthor',
-                        style: TextStyle(
-                            fontSize: 11,
-                            color: colorScheme.onSurfaceVariant),
+                    if (displayTags.isNotEmpty) ...[
+                      const SizedBox(height: 12),
+                      const Text('标签:', style: TextStyle(fontWeight: FontWeight.bold)),
+                      const SizedBox(height: 6),
+                      Wrap(
+                        spacing: 6,
+                        runSpacing: 6,
+                        children: displayTags
+                            .map((t) => _buildTagBadge(context, t, colorScheme))
+                            .toList(),
                       ),
-                    if (displayAuthor.isNotEmpty) const SizedBox(height: 4),
+                    ],
+                    const SizedBox(height: 12),
                     Text(
                       '最近更新于: ${plugin.updatedAt.length >= 19 ? plugin.updatedAt.substring(0, 19) : plugin.updatedAt}',
                       style: TextStyle(
@@ -1686,6 +1962,10 @@ class MarketPlugin {
   final String updatedAt;
   final String downloadUrl;
   final String manifestUrl;
+  final String name;
+  final String description;
+  final String? icon;
+  final List<String> tags;
 
   const MarketPlugin({
     required this.pluginId,
@@ -1693,15 +1973,28 @@ class MarketPlugin {
     required this.updatedAt,
     required this.downloadUrl,
     required this.manifestUrl,
+    required this.name,
+    required this.description,
+    this.icon,
+    required this.tags,
   });
 
   factory MarketPlugin.fromJson(Map<String, dynamic> json) {
+    final tagsList = json['tags'];
+    List<String> tagsDefs = [];
+    if (tagsList != null && tagsList is List) {
+      tagsDefs = tagsList.map((e) => e.toString()).toList();
+    }
     return MarketPlugin(
       pluginId: (json['plugin_id'] ?? '').toString(),
       version: (json['version'] ?? '').toString(),
       updatedAt: (json['updated_at'] ?? '').toString(),
       downloadUrl: (json['download_url'] ?? '').toString(),
       manifestUrl: (json['manifest_url'] ?? '').toString(),
+      name: (json['name'] ?? '').toString(),
+      description: (json['description'] ?? '').toString(),
+      icon: json['icon']?.toString(),
+      tags: tagsDefs,
     );
   }
 }
@@ -1712,20 +2005,28 @@ class ManifestInfo {
   final String description;
   final String author;
   final String? icon; // 例如 "material:groups"
+  final List<String> tags;
 
   const ManifestInfo({
     required this.name,
     required this.description,
     required this.author,
     this.icon,
+    required this.tags,
   });
 
   factory ManifestInfo.fromYaml(YamlMap yaml) {
+    final tagsList = yaml['tags'];
+    List<String> tagsDefs = [];
+    if (tagsList != null && tagsList is List) {
+      tagsDefs = tagsList.map((e) => e.toString()).toList();
+    }
     return ManifestInfo(
       name: (yaml['name'] ?? '').toString(),
       description: (yaml['description'] ?? '').toString(),
       author: (yaml['author'] ?? '').toString(),
       icon: yaml['icon']?.toString(),
+      tags: tagsDefs,
     );
   }
 }

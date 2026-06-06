@@ -13,7 +13,7 @@ import 'models/plugin_manager.dart';
 class PluginApiServer {
   static const int kPort = 19280;
   static const String kApiVersion = '1.0.0';
-  static const String kAppVersion = '1.2.6+2';
+  static const String kAppVersion = '1.2.8+2';
 
   final PluginManager pluginManager;
   HttpServer? _server;
@@ -172,50 +172,11 @@ class PluginApiServer {
 
   /// POST /api/plugins/register
   Future<void> _handleRegisterPlugin(HttpRequest req) async {
-    final body = await _readJsonBody(req);
-    if (body == null) return; // 已写入错误响应
-
-    final pluginId = body['pluginId'] as String?;
-    final entryPath = body['entryPath'] as String?;
-    final overwrite = body['overwrite'] as bool? ?? false;
-
-    if (pluginId == null || pluginId.isEmpty) {
-      _writeError(req.response, HttpStatus.badRequest, 'ERROR_BAD_REQUEST',
-          'Missing required field: pluginId');
-      return;
-    }
-    if (entryPath == null || entryPath.isEmpty) {
-      _writeError(req.response, HttpStatus.badRequest, 'ERROR_BAD_REQUEST',
-          'Missing required field: entryPath');
-      return;
-    }
-
-    try {
-      final plugin = await pluginManager.registerExistingPlugin(
-        pluginId: pluginId,
-        entryPath: entryPath,
-        overwrite: overwrite,
-      );
-      await _writeJson(req.response, HttpStatus.ok, {
-        'ok': true,
-        'data': _pluginToJson(plugin),
-      });
-    } on Exception catch (e) {
-      final msg = e.toString();
-      if (msg.contains('插件已存在')) {
-        await _writeError(req.response, HttpStatus.conflict, 'ERROR_PLUGIN_EXISTS',
-            msg);
-      } else if (msg.contains('不存在')) {
-        await _writeError(req.response, HttpStatus.notFound, 'ERROR_FILE_NOT_FOUND',
-            msg);
-      } else if (msg.contains('manifest') || msg.contains('格式')) {
-        await _writeError(req.response, HttpStatus.badRequest,
-            'ERROR_INVALID_MANIFEST', msg);
-      } else {
-        await _writeError(
-            req.response, HttpStatus.internalServerError, 'ERROR_INTERNAL', msg);
-      }
-    }
+    await _writeError(
+        req.response,
+        HttpStatus.badRequest,
+        'ERROR_DEPRECATED',
+        'The register endpoint is deprecated. Folder/development mode is no longer supported. Please package your plugin as .rcplugin and use /api/plugins/install.');
   }
 
   /// POST /api/plugins/install
@@ -223,25 +184,25 @@ class PluginApiServer {
     final body = await _readJsonBody(req);
     if (body == null) return;
 
-    final zipPath = body['zipPath'] as String?;
+    final rcpluginPath = body['rcpluginPath'] as String?;
     final overwrite = body['overwrite'] as bool? ?? false;
 
-    if (zipPath == null || zipPath.isEmpty) {
+    if (rcpluginPath == null || rcpluginPath.isEmpty) {
       _writeError(req.response, HttpStatus.badRequest, 'ERROR_BAD_REQUEST',
-          'Missing required field: zipPath');
+          'Missing required field: rcpluginPath');
       return;
     }
 
-    final zipFile = File(zipPath);
-    if (!await zipFile.exists()) {
+    final rcpluginFile = File(rcpluginPath);
+    if (!await rcpluginFile.exists()) {
       _writeError(req.response, HttpStatus.notFound, 'ERROR_FILE_NOT_FOUND',
-          'Zip file not found: $zipPath');
+          'Plugin file not found: $rcpluginPath');
       return;
     }
 
     try {
-      final plugin = await pluginManager.installPluginFromZip(
-        zipFile,
+      final plugin = await pluginManager.installPluginFromRcPlugin(
+        rcpluginFile,
         overwrite: overwrite,
       );
       await _writeJson(req.response, HttpStatus.ok, {
