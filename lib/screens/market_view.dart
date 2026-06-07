@@ -1,19 +1,13 @@
-import 'dart:convert';
-import 'dart:io';
-
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
-import 'package:path/path.dart' as p;
-import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
-import 'package:yaml/yaml.dart';
+import '../models/market_plugin.dart';
+import 'components/market_plugin_icon.dart';
 
 import '../models/plugin_manager.dart';
-import '../models/plugin_icon.dart';
-import '../models/tab_manager.dart';
-import '../utils/material_icons_registry.dart';
 import '../utils/responsive_helper.dart';
-import '../widgets/plugin_icon_widget.dart';
+import '../services/market_service.dart';
+import 'components/market_plugin_card.dart';
+import 'components/market_tags_filter.dart';
 
 /// 插件市场视图
 /// 使用 MD3 组件和主题色系统，重构为双 Tab 布局（已安装、在线市场）
@@ -49,10 +43,6 @@ class _MarketViewState extends State<MarketView> {
   // 历史版本加载状态：[pluginId] -> true=加载中
   final Map<String, bool> _versionsLoading = {};
 
-  // Worker API 地址（新地址）
-  static const String _apiBaseUrl =
-      'https://api.raincurtain-pluginmarket.goldeneaglepersonal.de5.net';
-
   @override
   void initState() {
     super.initState();
@@ -76,25 +66,10 @@ class _MarketViewState extends State<MarketView> {
     });
 
     try {
-      final url = query.isNotEmpty
-          ? '$_apiBaseUrl/api/plugins?q=${Uri.encodeComponent(query)}'
-          : '$_apiBaseUrl/api/plugins';
-      final res =
-          await http.get(Uri.parse(url)).timeout(const Duration(seconds: 15));
-      if (res.statusCode == 200) {
-        final jsonMap = json.decode(res.body);
-        if (jsonMap['success'] == true) {
-          final list = jsonMap['data'] as List;
-          setState(() {
-            _marketPlugins =
-                list.map((x) => MarketPlugin.fromJson(x)).toList();
-          });
-        } else {
-          throw Exception(jsonMap['error'] ?? '拉取列表失败');
-        }
-      } else {
-        throw Exception('HTTP 服务端响应异常 (${res.statusCode})');
-      }
+      final list = await MarketService.fetchMarketPlugins(query);
+      setState(() {
+        _marketPlugins = list;
+      });
     } catch (e) {
       setState(() {
         _marketError = e.toString();
@@ -120,21 +95,11 @@ class _MarketViewState extends State<MarketView> {
     });
 
     try {
-      final url = '$_apiBaseUrl/api/plugins/${Uri.encodeComponent(pluginId)}';
-      final res =
-          await http.get(Uri.parse(url)).timeout(const Duration(seconds: 15));
-      if (res.statusCode == 200) {
-        final jsonMap = json.decode(res.body);
-        if (jsonMap['success'] == true) {
-          final list = (jsonMap['data'] as List)
-              .map((x) => MarketPlugin.fromJson(x))
-              .toList();
-          if (mounted) {
-            setState(() {
-              _versionsCache[pluginId] = list;
-            });
-          }
-        }
+      final list = await MarketService.fetchPluginVersions(pluginId);
+      if (mounted) {
+        setState(() {
+          _versionsCache[pluginId] = list;
+        });
       }
     } catch (e) {
       debugPrint('[Market] 获取历史版本失败 ($pluginId): $e');
@@ -156,65 +121,16 @@ class _MarketViewState extends State<MarketView> {
       _downloadProgress[progressKey] = 0.0;
     });
 
-    // 优先使用 CDN 直链，失败时通过 Worker direct 模式
-    final cdnUrl = plugin.downloadUrl;
-    final directUrl =
-        '$_apiBaseUrl/api/plugins/download/${Uri.encodeComponent(plugin.pluginId)}/${Uri.encodeComponent(plugin.version)}?direct=true';
-
-    debugPrint('[Market] 准备下载插件: "${plugin.pluginId}" v${plugin.version}');
-    debugPrint('[Market] 优先尝试 CDN 下载 URL: $cdnUrl');
-
     try {
-      var client = http.Client();
-      var request = http.Request('GET', Uri.parse(cdnUrl));
-      var response = await client.send(request);
-
-      // 如果 CDN 域名下载失败，则自动尝试 Worker 直连下载通道
-      if (response.statusCode != 200) {
-        debugPrint('[Market] CDN 下载失败，状态码: ${response.statusCode}');
-        debugPrint('[Market] 正在尝试 Worker 直连下载通道: $directUrl');
-
-        client = http.Client();
-        request = http.Request('GET', Uri.parse(directUrl));
-        response = await client.send(request);
-
-        if (response.statusCode != 200) {
-          debugPrint('[Market] 直连下载也失败，状态码: ${response.statusCode}');
-          throw Exception('下载请求均告失败 (状态码: ${response.statusCode})');
-        } else {
-          debugPrint('[Market] 直连通道连接成功，开始流式传输数据...');
-        }
-      } else {
-        debugPrint('[Market] CDN 连接成功，开始流式传输数据...');
-      }
-
-      final contentLength = response.contentLength ?? 0;
-      List<int> bytes = [];
-      int downloaded = 0;
-
-      await for (var chunk in response.stream) {
-        bytes.addAll(chunk);
-        downloaded += chunk.length;
-        if (contentLength > 0) {
+      await MarketService.downloadAndInstall(
+        plugin: plugin,
+        pluginManager: pluginManager,
+        onProgress: (progress) {
           setState(() {
-            _downloadProgress[progressKey] = downloaded / contentLength;
+            _downloadProgress[progressKey] = progress;
           });
-        }
-      }
-
-      // 保存至临时文件
-      final tempDir = await getTemporaryDirectory();
-      final tempFile =
-          File(p.join(tempDir.path, '${plugin.pluginId}-${plugin.version}.rcplugin'));
-      await tempFile.writeAsBytes(bytes);
-
-      // 调用本地一键解压并注册
-      await pluginManager.installPluginFromRcPlugin(tempFile, overwrite: true);
-
-      // 清理临时包
-      if (await tempFile.exists()) {
-        await tempFile.delete();
-      }
+        },
+      );
 
       final displayName =
           plugin.name.isNotEmpty ? plugin.name : plugin.pluginId;
@@ -263,107 +179,6 @@ class _MarketViewState extends State<MarketView> {
       list = list.where((plugin) => plugin.manifest.tags.contains(_selectedLocalTag)).toList();
     }
     return list;
-  }
-
-  /// 构建胶囊标签 Badge
-  Widget _buildTagBadge(BuildContext context, String tag, ColorScheme colorScheme) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-      decoration: BoxDecoration(
-        color: colorScheme.secondaryContainer.withValues(alpha: 0.6),
-        borderRadius: BorderRadius.circular(4),
-      ),
-      child: Text(
-        tag,
-        style: TextStyle(
-          fontSize: 10,
-          color: colorScheme.onSecondaryContainer,
-          fontWeight: FontWeight.w500,
-        ),
-      ),
-    );
-  }
-
-  /// 构建已安装插件标签筛选横栏
-  Widget _buildLocalTagsFilter(BuildContext context, List<LocalPlugin> plugins, ColorScheme colorScheme) {
-    final tags = plugins.expand((p) => p.manifest.tags).toSet().toList();
-    if (tags.isEmpty) return const SizedBox.shrink();
-
-    return Container(
-      height: 38,
-      margin: const EdgeInsets.only(bottom: 8),
-      child: ListView(
-        scrollDirection: Axis.horizontal,
-        children: [
-          FilterChip(
-            label: const Text('全部'),
-            selected: _selectedLocalTag.isEmpty,
-            onSelected: (selected) {
-              setState(() {
-                _selectedLocalTag = '';
-              });
-            },
-          ),
-          const SizedBox(width: 8),
-          ...tags.map((tag) {
-            final isSelected = _selectedLocalTag == tag;
-            return Padding(
-              padding: const EdgeInsets.only(right: 8),
-              child: FilterChip(
-                label: Text(tag),
-                selected: isSelected,
-                onSelected: (selected) {
-                  setState(() {
-                    _selectedLocalTag = selected ? tag : '';
-                  });
-                },
-              ),
-            );
-          }),
-        ],
-      ),
-    );
-  }
-
-  /// 构建在线市场标签筛选横栏
-  Widget _buildMarketTagsFilter(BuildContext context, List<MarketPlugin> plugins, ColorScheme colorScheme) {
-    final tags = plugins.expand((p) => p.tags).toSet().toList();
-    if (tags.isEmpty) return const SizedBox.shrink();
-
-    return Container(
-      height: 38,
-      margin: const EdgeInsets.only(bottom: 8),
-      child: ListView(
-        scrollDirection: Axis.horizontal,
-        children: [
-          FilterChip(
-            label: const Text('全部'),
-            selected: _selectedMarketTag.isEmpty,
-            onSelected: (selected) {
-              setState(() {
-                _selectedMarketTag = '';
-              });
-            },
-          ),
-          const SizedBox(width: 8),
-          ...tags.map((tag) {
-            final isSelected = _selectedMarketTag == tag;
-            return Padding(
-              padding: const EdgeInsets.only(right: 8),
-              child: FilterChip(
-                label: Text(tag),
-                selected: isSelected,
-                onSelected: (selected) {
-                  setState(() {
-                    _selectedMarketTag = selected ? tag : '';
-                  });
-                },
-              ),
-            );
-          }),
-        ],
-      ),
-    );
   }
 
   @override
@@ -565,7 +380,15 @@ class _MarketViewState extends State<MarketView> {
           _buildSearchBar(context, colorScheme),
         ],
         const SizedBox(height: 8),
-        _buildLocalTagsFilter(context, plugins, colorScheme),
+        MarketTagsFilter(
+          tags: plugins.expand((p) => p.manifest.tags).toSet().toList(),
+          selectedTag: _selectedLocalTag,
+          onTagSelected: (tag) {
+            setState(() {
+              _selectedLocalTag = tag;
+            });
+          },
+        ),
         const SizedBox(height: 12),
         Expanded(
           child: filteredPlugins.isEmpty
@@ -622,7 +445,15 @@ class _MarketViewState extends State<MarketView> {
           _buildOnlineSearchBar(context, colorScheme),
         ],
         const SizedBox(height: 8),
-        _buildMarketTagsFilter(context, _marketPlugins, colorScheme),
+        MarketTagsFilter(
+          tags: _marketPlugins.expand((p) => p.tags).toSet().toList(),
+          selectedTag: _selectedMarketTag,
+          onTagSelected: (tag) {
+            setState(() {
+              _selectedMarketTag = tag;
+            });
+          },
+        ),
         const SizedBox(height: 12),
         Expanded(
           child: _isLoadingMarket
@@ -817,7 +648,6 @@ class _MarketViewState extends State<MarketView> {
     List<LocalPlugin> plugins,
     PluginManager pluginManager,
   ) {
-    final colorScheme = Theme.of(context).colorScheme;
     final isCompact = ResponsiveHelper.isCompact(context);
 
     if (isCompact) {
@@ -827,7 +657,11 @@ class _MarketViewState extends State<MarketView> {
         separatorBuilder: (_, __) => const SizedBox(height: 8),
         itemBuilder: (context, index) {
           final plugin = plugins[index];
-          return _buildCompactCard(context, plugin, pluginManager, colorScheme);
+          return MarketPluginCard(
+            localPlugin: plugin,
+            isDesktop: false,
+            onUninstall: (p) => _showUninstallDialog(context, p, pluginManager),
+          );
         },
       );
     }
@@ -843,7 +677,11 @@ class _MarketViewState extends State<MarketView> {
       itemCount: plugins.length,
       itemBuilder: (context, index) {
         final plugin = plugins[index];
-        return _buildDesktopCard(context, plugin, pluginManager, colorScheme);
+        return MarketPluginCard(
+          localPlugin: plugin,
+          isDesktop: true,
+          onUninstall: (p) => _showUninstallDialog(context, p, pluginManager),
+        );
       },
     );
   }
@@ -864,8 +702,20 @@ class _MarketViewState extends State<MarketView> {
         separatorBuilder: (_, __) => const SizedBox(height: 8),
         itemBuilder: (context, index) {
           final plugin = marketPlugins[index];
-          return _buildOnlineCompactCard(
-              context, plugin, pluginManager, colorScheme);
+          final local = pluginManager.getPluginById(plugin.pluginId);
+          final progressKey = '${plugin.pluginId}-${plugin.version}';
+          final isDownloading = _downloadProgress.containsKey(progressKey);
+          final downloadProgress = _downloadProgress[progressKey] ?? 0.0;
+
+          return MarketPluginCard(
+            marketPlugin: plugin,
+            isDesktop: false,
+            isDownloading: isDownloading,
+            downloadProgress: downloadProgress,
+            onInstall: (p) => _downloadAndInstall(p, pluginManager),
+            onDetail: (p) => _showOnlineDetailDialog(context, p, pluginManager, local),
+            onHistory: (p) => _showOnlineHistoryDialog(context, p, pluginManager, local),
+          );
         },
       );
     }
@@ -881,570 +731,21 @@ class _MarketViewState extends State<MarketView> {
       itemCount: marketPlugins.length,
       itemBuilder: (context, index) {
         final plugin = marketPlugins[index];
-        return _buildOnlineDesktopCard(
-            context, plugin, pluginManager, colorScheme);
+        final local = pluginManager.getPluginById(plugin.pluginId);
+        final progressKey = '${plugin.pluginId}-${plugin.version}';
+        final isDownloading = _downloadProgress.containsKey(progressKey);
+        final downloadProgress = _downloadProgress[progressKey] ?? 0.0;
+
+        return MarketPluginCard(
+          marketPlugin: plugin,
+          isDesktop: true,
+          isDownloading: isDownloading,
+          downloadProgress: downloadProgress,
+          onInstall: (p) => _downloadAndInstall(p, pluginManager),
+          onDetail: (p) => _showOnlineDetailDialog(context, p, pluginManager, local),
+          onHistory: (p) => _showOnlineHistoryDialog(context, p, pluginManager, local),
+        );
       },
-    );
-  }
-
-  /// 桌面端已安装卡片 (保留原有风格)
-  Widget _buildDesktopCard(
-    BuildContext context,
-    LocalPlugin plugin,
-    PluginManager pluginManager,
-    ColorScheme colorScheme,
-  ) {
-    return Card(
-      clipBehavior: Clip.antiAlias,
-      elevation: 0,
-      margin: EdgeInsets.zero,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(8),
-        side: BorderSide(
-          color: colorScheme.outlineVariant.withValues(alpha: 0.4),
-        ),
-      ),
-      child: InkWell(
-        onTap: () {
-          Provider.of<TabManager>(context, listen: false)
-              .openOrSwitchTab(plugin);
-        },
-        child: Stack(
-          children: [
-            Padding(
-              padding: const EdgeInsets.all(10),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      PluginIconWidget(plugin: plugin),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              plugin.name,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style:
-                                  Theme.of(context).textTheme.titleSmall?.copyWith(
-                                fontWeight: FontWeight.w700,
-                                color: colorScheme.onSurface,
-                                height: 1.2,
-                              ),
-                            ),
-                            const SizedBox(height: 2),
-                            Text(
-                              plugin.description,
-                              maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
-                              style:
-                                  Theme.of(context).textTheme.bodySmall?.copyWith(
-                                color: colorScheme.onSurfaceVariant,
-                                height: 1.3,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                  if (plugin.manifest.tags.isNotEmpty) ...[
-                    const SizedBox(height: 6),
-                    Wrap(
-                      spacing: 4,
-                      runSpacing: 4,
-                      children: plugin.manifest.tags
-                          .take(3)
-                          .map((t) => _buildTagBadge(context, t, colorScheme))
-                          .toList(),
-                    ),
-                  ],
-                  const Spacer(),
-                  Text(
-                    'v${plugin.version} · ${plugin.author}',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                      color:
-                          colorScheme.onSurfaceVariant.withValues(alpha: 0.6),
-                      height: 1.0,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            Positioned(
-              top: 4,
-              right: 4,
-              child: SizedBox(
-                width: 24,
-                height: 24,
-                child: IconButton(
-                  icon: const Icon(Icons.close, size: 14),
-                  color: colorScheme.onSurfaceVariant,
-                  padding: EdgeInsets.zero,
-                  onPressed: () =>
-                      _showUninstallDialog(context, plugin, pluginManager),
-                  tooltip: '卸载',
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  /// 桌面端在线卡片 (采用与已安装一致的风格，右上角带状态/下载动作与历史版本按钮)
-  Widget _buildOnlineDesktopCard(
-    BuildContext context,
-    MarketPlugin plugin,
-    PluginManager pluginManager,
-    ColorScheme colorScheme,
-  ) {
-    // 用 plugin_id（UUID）匹配本地已安装插件
-    final local = pluginManager.getPluginById(plugin.pluginId);
-    final progressKey = '${plugin.pluginId}-${plugin.version}';
-    final isDownloading = _downloadProgress.containsKey(progressKey);
-
-    final displayName = plugin.name.isNotEmpty ? plugin.name : plugin.pluginId;
-    final displayDesc = plugin.description.isNotEmpty ? plugin.description : '暂无功能描述';
-    final displayIcon = plugin.icon;
-    final displayTags = plugin.tags;
-
-    // 状态动作按钮
-    Widget buildActionWidget() {
-      if (isDownloading) {
-        final progress = _downloadProgress[progressKey] ?? 0.0;
-        return SizedBox(
-          width: 24,
-          height: 24,
-          child: Center(
-            child: SizedBox(
-              width: 14,
-              height: 14,
-              child: CircularProgressIndicator(
-                value: progress > 0 ? progress : null,
-                strokeWidth: 2,
-              ),
-            ),
-          ),
-        );
-      } else if (local == null) {
-        return SizedBox(
-          width: 24,
-          height: 24,
-          child: IconButton(
-            icon: Icon(Icons.download, size: 14, color: colorScheme.primary),
-            padding: EdgeInsets.zero,
-            onPressed: () => _downloadAndInstall(plugin, pluginManager),
-            tooltip: '安装',
-          ),
-        );
-      } else if (local.version != plugin.version) {
-        return SizedBox(
-          width: 24,
-          height: 24,
-          child: IconButton(
-            icon: Icon(Icons.system_update_alt, size: 14, color: colorScheme.secondary),
-            padding: EdgeInsets.zero,
-            onPressed: () => _downloadAndInstall(plugin, pluginManager),
-            tooltip: '更新',
-          ),
-        );
-      } else {
-        return const SizedBox(
-          width: 24,
-          height: 24,
-          child: Icon(Icons.check, size: 14, color: Colors.green),
-        );
-      }
-    }
-
-    return Card(
-      clipBehavior: Clip.antiAlias,
-      elevation: 0,
-      margin: EdgeInsets.zero,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(8),
-        side: BorderSide(
-          color: colorScheme.outlineVariant.withValues(alpha: 0.4),
-        ),
-      ),
-      child: InkWell(
-        onTap: isDownloading
-            ? null
-            : () => _showOnlineDetailDialog(
-                context, plugin, pluginManager, local),
-        child: Stack(
-          children: [
-            Padding(
-              padding: const EdgeInsets.all(10),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      MarketPluginIconWidget(
-                          iconString: displayIcon, name: displayName),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              displayName,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: Theme.of(context)
-                                  .textTheme
-                                  .titleSmall
-                                  ?.copyWith(
-                                fontWeight: FontWeight.w700,
-                                color: colorScheme.onSurface,
-                                height: 1.2,
-                              ),
-                            ),
-                            const SizedBox(height: 2),
-                            Text(
-                              displayDesc,
-                              maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
-                              style: Theme.of(context)
-                                  .textTheme
-                                  .bodySmall
-                                  ?.copyWith(
-                                color: colorScheme.onSurfaceVariant,
-                                height: 1.3,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                  if (displayTags.isNotEmpty) ...[
-                    const SizedBox(height: 6),
-                    Wrap(
-                      spacing: 4,
-                      runSpacing: 4,
-                      children: displayTags
-                          .take(3)
-                          .map((t) => _buildTagBadge(context, t, colorScheme))
-                          .toList(),
-                    ),
-                  ],
-                  const Spacer(),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Text(
-                        'v${plugin.version}',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                          color: colorScheme.onSurfaceVariant
-                              .withValues(alpha: 0.6),
-                          height: 1.0,
-                        ),
-                      ),
-                      if (isDownloading)
-                        Text(
-                          '下载中: ${(_downloadProgress[progressKey]! * 100).toStringAsFixed(0)}%',
-                          style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                            color: colorScheme.primary,
-                            fontWeight: FontWeight.bold,
-                            height: 1.0,
-                          ),
-                        ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-            Positioned(
-              top: 4,
-              right: 4,
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  buildActionWidget(),
-                  const SizedBox(width: 2),
-                  SizedBox(
-                    width: 24,
-                    height: 24,
-                    child: IconButton(
-                      icon: const Icon(Icons.history, size: 14),
-                      color: colorScheme.onSurfaceVariant,
-                      padding: EdgeInsets.zero,
-                      onPressed: () => _showOnlineHistoryDialog(
-                          context, plugin, pluginManager, local),
-                      tooltip: '历史版本',
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  /// 手机端已安装卡片 (保留原有风格)
-  Widget _buildCompactCard(
-    BuildContext context,
-    LocalPlugin plugin,
-    PluginManager pluginManager,
-    ColorScheme colorScheme,
-  ) {
-    return Card(
-      clipBehavior: Clip.antiAlias,
-      elevation: 0,
-      margin: EdgeInsets.zero,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(8),
-        side: BorderSide(
-          color: colorScheme.outlineVariant.withValues(alpha: 0.4),
-        ),
-      ),
-      child: InkWell(
-        onTap: () {
-          Provider.of<TabManager>(context, listen: false)
-              .openOrSwitchTab(plugin);
-        },
-        child: Padding(
-          padding: const EdgeInsets.all(10),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              PluginIconWidget(plugin: plugin),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      plugin.name,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                        fontWeight: FontWeight.w700,
-                        color: colorScheme.onSurface,
-                        height: 1.2,
-                      ),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      plugin.description,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        color: colorScheme.onSurfaceVariant,
-                        height: 1.2,
-                      ),
-                    ),
-                    if (plugin.manifest.tags.isNotEmpty) ...[
-                      const SizedBox(height: 4),
-                      Wrap(
-                        spacing: 4,
-                        runSpacing: 4,
-                        children: plugin.manifest.tags
-                            .take(2)
-                            .map((t) => _buildTagBadge(context, t, colorScheme))
-                            .toList(),
-                      ),
-                    ],
-                  ],
-                ),
-              ),
-              const SizedBox(width: 4),
-              SizedBox(
-                width: 24,
-                height: 24,
-                child: IconButton(
-                  icon: const Icon(Icons.close, size: 14),
-                  color: colorScheme.onSurfaceVariant,
-                  padding: EdgeInsets.zero,
-                  onPressed: () =>
-                      _showUninstallDialog(context, plugin, pluginManager),
-                  tooltip: '卸载',
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  /// 手机端在线卡片 (采用与已安装一致的风格)
-  Widget _buildOnlineCompactCard(
-    BuildContext context,
-    MarketPlugin plugin,
-    PluginManager pluginManager,
-    ColorScheme colorScheme,
-  ) {
-    final local = pluginManager.getPluginById(plugin.pluginId);
-    final progressKey = '${plugin.pluginId}-${plugin.version}';
-    final isDownloading = _downloadProgress.containsKey(progressKey);
-
-    final displayName = plugin.name.isNotEmpty ? plugin.name : plugin.pluginId;
-    final displayDesc = plugin.description.isNotEmpty ? plugin.description : '暂无功能描述';
-    final displayIcon = plugin.icon;
-    final displayTags = plugin.tags;
-
-    // 状态动作按钮
-    Widget buildActionWidget() {
-      if (isDownloading) {
-        final progress = _downloadProgress[progressKey] ?? 0.0;
-        return SizedBox(
-          width: 24,
-          height: 24,
-          child: Center(
-            child: SizedBox(
-              width: 14,
-              height: 14,
-              child: CircularProgressIndicator(
-                value: progress > 0 ? progress : null,
-                strokeWidth: 2,
-              ),
-            ),
-          ),
-        );
-      } else if (local == null) {
-        return SizedBox(
-          width: 24,
-          height: 24,
-          child: IconButton(
-            icon: Icon(Icons.download, size: 14, color: colorScheme.primary),
-            padding: EdgeInsets.zero,
-            onPressed: () => _downloadAndInstall(plugin, pluginManager),
-            tooltip: '安装',
-          ),
-        );
-      } else if (local.version != plugin.version) {
-        return SizedBox(
-          width: 24,
-          height: 24,
-          child: IconButton(
-            icon: Icon(Icons.system_update_alt, size: 14, color: colorScheme.secondary),
-            padding: EdgeInsets.zero,
-            onPressed: () => _downloadAndInstall(plugin, pluginManager),
-            tooltip: '更新',
-          ),
-        );
-      } else {
-        return const SizedBox(
-          width: 24,
-          height: 24,
-          child: Icon(Icons.check, size: 14, color: Colors.green),
-        );
-      }
-    }
-
-    return Card(
-      clipBehavior: Clip.antiAlias,
-      elevation: 0,
-      margin: EdgeInsets.zero,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(8),
-        side: BorderSide(
-          color: colorScheme.outlineVariant.withValues(alpha: 0.4),
-        ),
-      ),
-      child: InkWell(
-        onTap: isDownloading
-            ? null
-            : () => _showOnlineDetailDialog(
-                context, plugin, pluginManager, local),
-        child: Padding(
-          padding: const EdgeInsets.all(10),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              MarketPluginIconWidget(
-                  iconString: displayIcon, name: displayName),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      displayName,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                        fontWeight: FontWeight.w700,
-                        color: colorScheme.onSurface,
-                        height: 1.2,
-                      ),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      displayDesc,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        color: colorScheme.onSurfaceVariant,
-                        height: 1.2,
-                      ),
-                    ),
-                    if (displayTags.isNotEmpty) ...[
-                      const SizedBox(height: 4),
-                      Wrap(
-                        spacing: 4,
-                        runSpacing: 4,
-                        children: displayTags
-                            .take(2)
-                            .map((t) => _buildTagBadge(context, t, colorScheme))
-                            .toList(),
-                      ),
-                    ],
-                  ],
-                ),
-              ),
-              const SizedBox(width: 4),
-              Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if (isDownloading) ...[
-                    Text(
-                      '${(_downloadProgress[progressKey]! * 100).toStringAsFixed(0)}%',
-                      style: TextStyle(
-                          fontSize: 11,
-                          color: colorScheme.primary,
-                          fontWeight: FontWeight.bold),
-                    ),
-                    const SizedBox(width: 4),
-                  ],
-                  buildActionWidget(),
-                  const SizedBox(width: 2),
-                  SizedBox(
-                    width: 24,
-                    height: 24,
-                    child: IconButton(
-                      icon: const Icon(Icons.history, size: 14),
-                      color: colorScheme.onSurfaceVariant,
-                      padding: EdgeInsets.zero,
-                      onPressed: () => _showOnlineHistoryDialog(
-                          context, plugin, pluginManager, local),
-                      tooltip: '历史版本',
-                    ),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
-      ),
     );
   }
 
@@ -1967,176 +1268,22 @@ class _MarketViewState extends State<MarketView> {
       ),
     );
   }
-}
 
-// ──────────────────────────────────────────────────────────────────────────────
-// 在线插件图标组件（支持 manifest 中的 material:iconName 格式图标）
-// ──────────────────────────────────────────────────────────────────────────────
-
-/// 专为在线卡片绘制的图标组件
-/// - 若 iconString 为 "material:xxx" 格式，渲染对应 Material Icon
-/// - 否则显示插件名称首字作为兜底
-class MarketPluginIconWidget extends StatelessWidget {
-  final String? iconString;
-  final String name;
-  final double size;
-
-  const MarketPluginIconWidget({
-    super.key,
-    required this.iconString,
-    required this.name,
-    this.size = 32.0,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final colorScheme = Theme.of(context).colorScheme;
-
+  Widget _buildTagBadge(BuildContext context, String tag, ColorScheme colorScheme) {
     return Container(
-      width: size + 16,
-      height: size + 16,
-      padding: const EdgeInsets.all(4),
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
       decoration: BoxDecoration(
-        color: colorScheme.primaryContainer.withValues(alpha: 0.3),
-        borderRadius: BorderRadius.circular(8),
+        color: colorScheme.secondaryContainer.withValues(alpha: 0.6),
+        borderRadius: BorderRadius.circular(4),
       ),
-      child: Center(
-        child: _buildIconContent(colorScheme),
+      child: Text(
+        tag,
+        style: TextStyle(
+          fontSize: 10,
+          color: colorScheme.onSecondaryContainer,
+          fontWeight: FontWeight.w500,
+        ),
       ),
-    );
-  }
-
-  Widget _buildIconContent(ColorScheme colorScheme) {
-    // 解析 "material:icon_name" 格式
-    if (iconString != null && iconString!.startsWith('material:')) {
-      final iconName = iconString!.substring('material:'.length).trim();
-      return _buildMaterialIcon(iconName, colorScheme);
-    }
-
-    // 兜底：首字缩写
-    return _buildAbbreviation(colorScheme);
-  }
-
-  Widget _buildMaterialIcon(String iconName, ColorScheme colorScheme) {
-    final registry = MaterialIconsRegistry.instance;
-    final codePoint =
-        registry.lookup(iconName, MaterialIconVariant.filled);
-
-    if (codePoint == null) {
-      return _buildAbbreviation(colorScheme);
-    }
-
-    return Text(
-      String.fromCharCode(codePoint),
-      textAlign: TextAlign.center,
-      textDirection: TextDirection.ltr,
-      style: TextStyle(
-        fontFamily: 'MaterialIcons',
-        fontSize: size,
-        height: 1.0,
-        color: colorScheme.onPrimaryContainer,
-        fontFamilyFallback: const <String>[],
-      ),
-    );
-  }
-
-  Widget _buildAbbreviation(ColorScheme colorScheme) {
-    final abbr = name
-        .substring(0, name.length > 2 ? 2 : name.length)
-        .toUpperCase();
-    return Text(
-      abbr,
-      textAlign: TextAlign.center,
-      style: TextStyle(
-        fontSize: size * 0.5,
-        color: colorScheme.onPrimaryContainer,
-        fontWeight: FontWeight.w600,
-        fontFamily: 'NotoSerifSC',
-      ),
-    );
-  }
-}
-
-// ──────────────────────────────────────────────────────────────────────────────
-// 数据模型
-// ──────────────────────────────────────────────────────────────────────────────
-
-/// 从插件市场 API 返回的在线插件实体（仅包含 API 直接返回的字段）
-/// name/description/icon/author 需从 manifestUrl 单独拉取
-class MarketPlugin {
-  final String pluginId;
-  final String version;
-  final String updatedAt;
-  final String downloadUrl;
-  final String manifestUrl;
-  final String name;
-  final String description;
-  final String? icon;
-  final List<String> tags;
-  final String changelog;
-
-  const MarketPlugin({
-    required this.pluginId,
-    required this.version,
-    required this.updatedAt,
-    required this.downloadUrl,
-    required this.manifestUrl,
-    required this.name,
-    required this.description,
-    this.icon,
-    required this.tags,
-    required this.changelog,
-  });
-
-  factory MarketPlugin.fromJson(Map<String, dynamic> json) {
-    final tagsList = json['tags'];
-    List<String> tagsDefs = [];
-    if (tagsList != null && tagsList is List) {
-      tagsDefs = tagsList.map((e) => e.toString()).toList();
-    }
-    return MarketPlugin(
-      pluginId: (json['plugin_id'] ?? '').toString(),
-      version: (json['version'] ?? '').toString(),
-      updatedAt: (json['updated_at'] ?? '').toString(),
-      downloadUrl: (json['download_url'] ?? '').toString(),
-      manifestUrl: (json['manifest_url'] ?? '').toString(),
-      name: (json['name'] ?? '').toString(),
-      description: (json['description'] ?? '').toString(),
-      icon: json['icon']?.toString(),
-      tags: tagsDefs,
-      changelog: (json['changelog'] ?? '').toString(),
-    );
-  }
-}
-
-/// 从 manifest_url 拉取并解析得到的附加信息
-class ManifestInfo {
-  final String name;
-  final String description;
-  final String author;
-  final String? icon; // 例如 "material:groups"
-  final List<String> tags;
-
-  const ManifestInfo({
-    required this.name,
-    required this.description,
-    required this.author,
-    this.icon,
-    required this.tags,
-  });
-
-  factory ManifestInfo.fromYaml(YamlMap yaml) {
-    final tagsList = yaml['tags'];
-    List<String> tagsDefs = [];
-    if (tagsList != null && tagsList is List) {
-      tagsDefs = tagsList.map((e) => e.toString()).toList();
-    }
-    return ManifestInfo(
-      name: (yaml['name'] ?? '').toString(),
-      description: (yaml['description'] ?? '').toString(),
-      author: (yaml['author'] ?? '').toString(),
-      icon: yaml['icon']?.toString(),
-      tags: tagsDefs,
     );
   }
 }
