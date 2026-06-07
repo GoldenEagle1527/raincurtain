@@ -90,20 +90,37 @@ class PluginManager extends ChangeNotifier {
     final List<LocalPlugin> loaded = [];
 
     for (final row in rows) {
-      final entryPath = row['entry_path'] as String;
+      var entryPath = row['entry_path'] as String;
       final pluginId = row['plugin_id'] as String;
       if (entryPath.isEmpty) continue;
 
       try {
-        if (!entryPath.endsWith('.rcplugin')) {
-          debugPrint('Legacy format plugin ignored: $entryPath');
-          await db.delete('plugins', where: 'plugin_id = ?', whereArgs: [pluginId]);
-          continue;
+        // 兼容和迁移逻辑：
+        if (entryPath.endsWith('.rcplugin')) {
+          final rcpluginFile = File(p.join(sandboxDir.path, entryPath));
+          if (await rcpluginFile.exists()) {
+            final destDir = Directory(p.join(sandboxDir.path, pluginId));
+            debugPrint('Migrating plugin $pluginId from .rcplugin file to directory...');
+            await _extractRcPlugin(rcpluginFile, destDir);
+            try {
+              await rcpluginFile.delete();
+            } catch (e) {
+              debugPrint('Failed to delete legacy .rcplugin file: $e');
+            }
+          }
+          entryPath = pluginId;
+          // 更新数据库中的 entry_path 为 pluginId
+          await db.update(
+            'plugins',
+            {'entry_path': pluginId},
+            where: 'plugin_id = ?',
+            whereArgs: [pluginId],
+          );
         }
 
-        final rcpluginFile = File(p.join(sandboxDir.path, entryPath));
-        if (!await rcpluginFile.exists()) {
-          debugPrint('.rcplugin file not found: $entryPath. Cleaning DB.');
+        final pluginDir = Directory(p.join(sandboxDir.path, entryPath));
+        if (!await pluginDir.exists()) {
+          debugPrint('Plugin directory not found: $entryPath. Cleaning DB.');
           await db.delete('plugins', where: 'plugin_id = ?', whereArgs: [pluginId]);
           continue;
         }
@@ -121,15 +138,10 @@ class PluginManager extends ChangeNotifier {
         }
 
         if (manifest == null) {
-          Database? pluginDb;
-          try {
-            pluginDb = await databaseFactory.openDatabase(rcpluginFile.path, options: OpenDatabaseOptions(readOnly: true));
-            final results = await pluginDb.query('metadata', columns: ['value'], where: 'key = ?', whereArgs: ['manifest_yaml']);
-            if (results.isEmpty) {
-              throw Exception('manifest_yaml not found in metadata table');
-            }
-            final manifestYaml = results.first['value'] as String;
-            manifest = PluginManifest.fromYamlMap(loadYaml(manifestYaml));
+          final manifestFile = File(p.join(pluginDir.path, 'manifest.yml'));
+          if (await manifestFile.exists()) {
+            final content = await manifestFile.readAsString();
+            manifest = PluginManifest.fromYamlMap(loadYaml(content));
             // 缓存写回数据库
             await db.update(
               'plugins',
@@ -137,10 +149,8 @@ class PluginManager extends ChangeNotifier {
               where: 'plugin_id = ?',
               whereArgs: [pluginId],
             );
-          } finally {
-            if (pluginDb != null) {
-              await pluginDb.close();
-            }
+          } else {
+            throw Exception('manifest.yml not found in plugin directory');
           }
         }
 
@@ -188,36 +198,50 @@ class PluginManager extends ChangeNotifier {
     // 扫描沙箱目录
     final entities = await sandboxDir.list().toList();
     for (final entity in entities) {
-      if (entity is File && entity.path.endsWith('.rcplugin')) {
-        // 发现未注册的 rcplugin 文件
-        final filename = p.basename(entity.path);
+      if (entity is Directory) {
+        final pluginId = p.basename(entity.path);
+        if (registeredIds.contains(pluginId)) continue;
+
+        // 发现未注册的文件夹
+        final manifestFile = File(p.join(entity.path, 'manifest.yml'));
+        if (await manifestFile.exists()) {
+          try {
+            final content = await manifestFile.readAsString();
+            final manifest = PluginManifest.fromYamlMap(loadYaml(content));
+            await db.insert('plugins', {
+              'plugin_id': manifest.id.isNotEmpty ? manifest.id : pluginId,
+              'entry_path': pluginId,
+              'manifest_json': jsonEncode(manifest.toJson()),
+              'sort_order': nextOrder++,
+            });
+            debugPrint('Auto-registered plugin directory: $pluginId');
+          } catch (e) {
+            debugPrint('Failed to auto-register plugin directory ($pluginId): $e');
+          }
+        }
+      } else if (entity is File && entity.path.endsWith('.rcplugin')) {
+        // 发现未注册的 rcplugin 文件，将其提取并注册为目录
         final pluginId = p.basenameWithoutExtension(entity.path);
         if (registeredIds.contains(pluginId)) continue;
 
         try {
-          Database? pluginDb;
-          PluginManifest manifest;
-          try {
-            pluginDb = await databaseFactory.openDatabase(entity.path, options: OpenDatabaseOptions(readOnly: true));
-            final results = await pluginDb.query('metadata', columns: ['value'], where: 'key = ?', whereArgs: ['manifest_yaml']);
-            if (results.isEmpty) {
-              continue;
+          final manifest = await _readManifestFromRcPlugin(entity);
+          if (manifest != null) {
+            final destDir = Directory(p.join(sandboxDir.path, pluginId));
+            await _extractRcPlugin(entity, destDir);
+            await db.insert('plugins', {
+              'plugin_id': manifest.id.isNotEmpty ? manifest.id : pluginId,
+              'entry_path': pluginId,
+              'manifest_json': jsonEncode(manifest.toJson()),
+              'sort_order': nextOrder++,
+            });
+            try {
+              await entity.delete();
+            } catch (e) {
+              debugPrint('Failed to delete auto-extracted legacy .rcplugin: $e');
             }
-            final manifestYaml = results.first['value'] as String;
-            manifest = PluginManifest.fromYamlMap(loadYaml(manifestYaml));
-          } finally {
-            if (pluginDb != null) {
-              await pluginDb.close();
-            }
+            debugPrint('Auto-extracted and registered rcplugin: $pluginId');
           }
-
-          await db.insert('plugins', {
-            'plugin_id': manifest.id.isNotEmpty ? manifest.id : pluginId,
-            'entry_path': filename,
-            'manifest_json': jsonEncode(manifest.toJson()),
-            'sort_order': nextOrder++,
-          });
-          debugPrint('Auto-registered rcplugin from disk: $pluginId');
         } catch (e) {
           debugPrint('Failed to auto-register rcplugin ($pluginId): $e');
         }
@@ -283,16 +307,14 @@ class PluginManager extends ChangeNotifier {
       _plugins.removeWhere((p) => p.id == pluginId);
     }
 
-    final destFileName = '$pluginId.rcplugin';
-    final destFile = File(p.join(sandboxDir.path, destFileName));
-    
-    if (await destFile.exists()) {
-      await destFile.delete();
+    final destDir = Directory(p.join(sandboxDir.path, pluginId));
+    if (await destDir.exists()) {
+      await destDir.delete(recursive: true);
     }
-    await rcpluginFile.copy(destFile.path);
+    await _extractRcPlugin(rcpluginFile, destDir);
 
     final newPlugin = LocalPlugin(
-      entryPath: destFileName,
+      entryPath: pluginId,
       manifest: manifest,
     );
 
@@ -318,11 +340,13 @@ class PluginManager extends ChangeNotifier {
     }
 
     final oldPlugin = _plugins[idx];
-    final rcpluginFile = File(p.join(sandboxDir.path, oldPlugin.entryPath));
-    final manifest = await _readManifestFromRcPlugin(rcpluginFile);
-    if (manifest == null) {
-      throw Exception('读取 manifest 失败，文件损坏或不可用');
+    final manifestFile = File(p.join(sandboxDir.path, oldPlugin.entryPath, 'manifest.yml'));
+    if (!await manifestFile.exists()) {
+      throw Exception('manifest.yml 不存在，无法热更新');
     }
+
+    final content = await manifestFile.readAsString();
+    final manifest = PluginManifest.fromYamlMap(loadYaml(content));
 
     final updatedPlugin = LocalPlugin(
       entryPath: oldPlugin.entryPath,
@@ -415,9 +439,57 @@ class PluginManager extends ChangeNotifier {
     if (onBeforePluginFileChange != null) {
       await onBeforePluginFileChange!(pluginId);
     }
+    final pluginDir = Directory(p.join(sandboxDir.path, pluginId));
+    if (await pluginDir.exists()) {
+      await pluginDir.delete(recursive: true);
+    }
     final rcpluginFile = File(p.join(sandboxDir.path, '$pluginId.rcplugin'));
     if (await rcpluginFile.exists()) {
       await rcpluginFile.delete();
+    }
+  }
+
+  /// 提取 rcplugin 中的所有资源到物理文件夹
+  Future<void> _extractRcPlugin(File rcpluginFile, Directory destDir) async {
+    if (!await destDir.exists()) {
+      await destDir.create(recursive: true);
+    }
+    Database? pluginDb;
+    try {
+      pluginDb = await databaseFactory.openDatabase(rcpluginFile.path, options: OpenDatabaseOptions(readOnly: true));
+      final rows = await pluginDb.query('sqlar', columns: ['name', 'sz', 'data']);
+      for (final row in rows) {
+        final name = row['name'] as String;
+        final sz = row['sz'] as int;
+        final data = row['data'] as Uint8List?;
+
+        final cleanFilePath = p.normalize(name).replaceAll('\\', '/');
+        if (cleanFilePath.startsWith('../') || cleanFilePath == '..') {
+          continue;
+        }
+
+        final file = File(p.join(destDir.path, cleanFilePath));
+        if (sz == 0 && data == null) {
+          await Directory(file.path).create(recursive: true);
+          continue;
+        }
+
+        await file.parent.create(recursive: true);
+
+        if (data != null) {
+          Uint8List contentBytes;
+          if (sz > data.length) {
+            contentBytes = Uint8List.fromList(ZLibDecoder(raw: true).convert(data));
+          } else {
+            contentBytes = data;
+          }
+          await file.writeAsBytes(contentBytes);
+        }
+      }
+    } finally {
+      if (pluginDb != null) {
+        await pluginDb.close();
+      }
     }
   }
 

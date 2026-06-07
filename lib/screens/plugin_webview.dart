@@ -132,7 +132,7 @@ class PluginWebViewState extends State<PluginWebView>
     super.build(context); // AutomaticKeepAliveClientMixin 要求
     final colorScheme = Theme.of(context).colorScheme;
     // 使用系统自动分配的沙盒服务器端口
-    final url = 'http://localhost:$sandboxServerPort/${widget.plugin.entryPath}';
+    final url = 'http://localhost:$sandboxServerPort/${widget.plugin.id}/';
 
     return Stack(
       children: [

@@ -1182,7 +1182,7 @@ class _MarketViewState extends State<MarketView> {
                       icon: const Icon(Icons.history, size: 14),
                       color: colorScheme.onSurfaceVariant,
                       padding: EdgeInsets.zero,
-                      onPressed: () => _showOnlineDetailDialog(
+                      onPressed: () => _showOnlineHistoryDialog(
                           context, plugin, pluginManager, local),
                       tooltip: '历史版本',
                     ),
@@ -1434,7 +1434,7 @@ class _MarketViewState extends State<MarketView> {
                       icon: const Icon(Icons.history, size: 14),
                       color: colorScheme.onSurfaceVariant,
                       padding: EdgeInsets.zero,
-                      onPressed: () => _showOnlineDetailDialog(
+                      onPressed: () => _showOnlineHistoryDialog(
                           context, plugin, pluginManager, local),
                       tooltip: '历史版本',
                     ),
@@ -1448,7 +1448,7 @@ class _MarketViewState extends State<MarketView> {
     );
   }
 
-  /// 弹出在线插件详情对话框 (含历史版本列表与单独下载功能)
+  /// 弹出在线插件详情对话框
   void _showOnlineDetailDialog(
     BuildContext context,
     MarketPlugin plugin,
@@ -1460,9 +1460,6 @@ class _MarketViewState extends State<MarketView> {
     final displayDesc = plugin.description.isNotEmpty ? plugin.description : '暂无功能描述。';
     final displayIcon = plugin.icon;
     final displayTags = plugin.tags;
-
-    // 触发预拉取历史版本（若尚未缓存）
-    _fetchPluginVersions(plugin.pluginId);
 
     showDialog(
       context: context,
@@ -1526,179 +1523,63 @@ class _MarketViewState extends State<MarketView> {
               );
             }
 
-            // 历史版本列表
-            final versions = _versionsCache[plugin.pluginId];
-            final isLoadingVersions =
-                _versionsLoading[plugin.pluginId] == true;
-
-            Widget historySection;
-            if (isLoadingVersions && versions == null) {
-              historySection = const Padding(
-                padding: EdgeInsets.symmetric(vertical: 8),
-                child: Center(
-                    child: SizedBox(
-                  width: 16,
-                  height: 16,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                )),
+            Widget contentWidget;
+            if (local == null) {
+              // 没安装过，显示描述
+              contentWidget = Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('插件功能描述:',
+                      style: TextStyle(fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 6),
+                  Container(
+                    width: double.maxFinite,
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: colorScheme.surfaceContainerHighest
+                          .withValues(alpha: 0.2),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(
+                          color: colorScheme.outlineVariant
+                              .withValues(alpha: 0.3)),
+                    ),
+                    child: Text(
+                      displayDesc,
+                      style: Theme.of(ctx).textTheme.bodyMedium?.copyWith(
+                        color: colorScheme.onSurface,
+                      ),
+                    ),
+                  ),
+                ],
               );
-            } else if (versions == null || versions.length <= 1) {
-              // 只有一个版本（即最新版本），不显示历史区域
-              historySection = const SizedBox.shrink();
             } else {
-              // 过滤掉当前最新版本（第一条），展示其余历史版本
-              final historyVersions = versions
-                  .where((v) => v.version != plugin.version)
-                  .toList();
-
-              if (historyVersions.isEmpty) {
-                historySection = const SizedBox.shrink();
-              } else {
-                historySection = Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const SizedBox(height: 16),
-                    Row(
-                      children: [
-                        Icon(Icons.history,
-                            size: 14,
-                            color: colorScheme.onSurfaceVariant),
-                        const SizedBox(width: 4),
-                        Text(
-                          '历史版本',
-                          style: TextStyle(
-                            fontSize: 12,
-                            fontWeight: FontWeight.bold,
-                            color: colorScheme.onSurfaceVariant,
+              // 安装过，显示变更日志
+              contentWidget = Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('版本变更日志:',
+                      style: TextStyle(fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 6),
+                  Container(
+                    width: double.maxFinite,
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: colorScheme.primaryContainer
+                          .withValues(alpha: 0.15),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(
+                          color: colorScheme.primary
+                              .withValues(alpha: 0.25)),
+                    ),
+                    child: Text(
+                      plugin.changelog.isNotEmpty ? plugin.changelog : '暂无变更日志',
+                      style: Theme.of(ctx).textTheme.bodyMedium?.copyWith(
+                            color: colorScheme.onSurface,
                           ),
-                        ),
-                      ],
                     ),
-                    const SizedBox(height: 6),
-                    Container(
-                      width: double.maxFinite,
-                      constraints: const BoxConstraints(maxHeight: 180),
-                      decoration: BoxDecoration(
-                        color: colorScheme.surfaceContainerHighest
-                            .withValues(alpha: 0.15),
-                        borderRadius: BorderRadius.circular(8),
-                        border: Border.all(
-                            color: colorScheme.outlineVariant
-                                .withValues(alpha: 0.3)),
-                      ),
-                      child: ListView.separated(
-                        shrinkWrap: true,
-                        padding: const EdgeInsets.symmetric(vertical: 4),
-                        itemCount: historyVersions.length,
-                        separatorBuilder: (_, __) => Divider(
-                          height: 1,
-                          indent: 12,
-                          endIndent: 12,
-                          color:
-                              colorScheme.outlineVariant.withValues(alpha: 0.3),
-                        ),
-                        itemBuilder: (_, i) {
-                          final v = historyVersions[i];
-                          final vProgressKey =
-                              '${v.pluginId}-${v.version}';
-                          final vIsDownloading =
-                              _downloadProgress.containsKey(vProgressKey);
-                          final vProgress =
-                              _downloadProgress[vProgressKey] ?? 0.0;
-                          final isInstalled =
-                              local?.version == v.version;
-
-                          return ListTile(
-                            dense: true,
-                            contentPadding: const EdgeInsets.symmetric(
-                                horizontal: 12, vertical: 0),
-                            leading: Container(
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 6, vertical: 2),
-                                decoration: BoxDecoration(
-                                  color: isInstalled
-                                      ? Colors.green.withValues(alpha: 0.15)
-                                      : colorScheme.primaryContainer
-                                          .withValues(alpha: 0.4),
-                                  borderRadius: BorderRadius.circular(4),
-                                ),
-                                child: Text(
-                                  'v${v.version}',
-                                  style: TextStyle(
-                                    fontSize: 11,
-                                    fontWeight: FontWeight.w600,
-                                    color: isInstalled
-                                        ? Colors.green
-                                        : colorScheme.primary,
-                                  ),
-                                ),
-                              ),
-                            title: Text(
-                              v.updatedAt.length >= 10
-                                  ? v.updatedAt.substring(0, 10)
-                                  : v.updatedAt,
-                              style: TextStyle(
-                                  fontSize: 11,
-                                  color: colorScheme.onSurfaceVariant),
-                            ),
-                            trailing: vIsDownloading
-                                ? SizedBox(
-                                    width: 60,
-                                    child: Row(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        SizedBox(
-                                          width: 12,
-                                          height: 12,
-                                          child: CircularProgressIndicator(
-                                            value: vProgress > 0
-                                                ? vProgress
-                                                : null,
-                                            strokeWidth: 1.5,
-                                          ),
-                                        ),
-                                        const SizedBox(width: 4),
-                                        Text(
-                                          '${(vProgress * 100).toStringAsFixed(0)}%',
-                                          style: TextStyle(
-                                              fontSize: 10,
-                                              color: colorScheme.primary),
-                                        ),
-                                      ],
-                                    ),
-                                  )
-                                : isInstalled
-                                    ? Tooltip(
-                                        message: '当前已安装',
-                                        child: const Icon(Icons.check_circle,
-                                            size: 16,
-                                            color: Colors.green),
-                                      )
-                                    : TextButton(
-                                        style: TextButton.styleFrom(
-                                          padding: const EdgeInsets.symmetric(
-                                              horizontal: 8, vertical: 4),
-                                          minimumSize: Size.zero,
-                                          tapTargetSize:
-                                              MaterialTapTargetSize.shrinkWrap,
-                                        ),
-                                        onPressed: anyDownloading
-                                            ? null
-                                            : () {
-                                                Navigator.pop(ctx);
-                                                _downloadAndInstall(
-                                                    v, pluginManager);
-                                              },
-                                        child: const Text('安装此版本',
-                                            style: TextStyle(fontSize: 11)),
-                                      ),
-                          );
-                        },
-                      ),
-                    ),
-                  ],
-                );
-              }
+                  ),
+                ],
+              );
             }
 
             return AlertDialog(
@@ -1745,27 +1626,7 @@ class _MarketViewState extends State<MarketView> {
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Text('插件功能描述:',
-                        style: TextStyle(fontWeight: FontWeight.bold)),
-                    const SizedBox(height: 6),
-                    Container(
-                      width: double.maxFinite,
-                      padding: const EdgeInsets.all(12),
-                      decoration: BoxDecoration(
-                        color: colorScheme.surfaceContainerHighest
-                            .withValues(alpha: 0.2),
-                        borderRadius: BorderRadius.circular(8),
-                        border: Border.all(
-                            color: colorScheme.outlineVariant
-                                .withValues(alpha: 0.3)),
-                      ),
-                      child: Text(
-                        displayDesc,
-                        style: Theme.of(ctx).textTheme.bodyMedium?.copyWith(
-                          color: colorScheme.onSurface,
-                        ),
-                      ),
-                    ),
+                    contentWidget,
                     if (displayTags.isNotEmpty) ...[
                       const SizedBox(height: 12),
                       const Text('标签:', style: TextStyle(fontWeight: FontWeight.bold)),
@@ -1785,8 +1646,6 @@ class _MarketViewState extends State<MarketView> {
                           fontSize: 11,
                           color: colorScheme.onSurfaceVariant),
                     ),
-                    // 历史版本区域
-                    historySection,
                   ],
                 ),
               ),
@@ -1795,7 +1654,255 @@ class _MarketViewState extends State<MarketView> {
                   onPressed: () => Navigator.pop(ctx),
                   child: const Text('关闭'),
                 ),
+                TextButton.icon(
+                  icon: const Icon(Icons.history, size: 16),
+                  label: const Text('历史版本'),
+                  onPressed: () {
+                    Navigator.pop(ctx);
+                    _showOnlineHistoryDialog(context, plugin, pluginManager, local);
+                  },
+                ),
                 actionButton,
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  /// 弹出在线插件历史版本对话框
+  void _showOnlineHistoryDialog(
+    BuildContext context,
+    MarketPlugin plugin,
+    PluginManager pluginManager,
+    LocalPlugin? local,
+  ) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final displayName = plugin.name.isNotEmpty ? plugin.name : plugin.pluginId;
+    final displayDesc = plugin.description.isNotEmpty ? plugin.description : '暂无功能描述。';
+    final displayIcon = plugin.icon;
+
+    // 触发预拉取历史版本（若尚未缓存）
+    _fetchPluginVersions(plugin.pluginId);
+
+    showDialog(
+      context: context,
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (ctx, setDialogState) {
+            final anyDownloading = _downloadProgress.keys
+                .any((k) => k.startsWith('${plugin.pluginId}-'));
+
+            final versions = _versionsCache[plugin.pluginId];
+            final isLoadingVersions = _versionsLoading[plugin.pluginId] == true;
+
+            Widget historyListWidget;
+            if (isLoadingVersions && versions == null) {
+              historyListWidget = const Padding(
+                padding: EdgeInsets.symmetric(vertical: 24),
+                child: Center(
+                  child: CircularProgressIndicator(),
+                ),
+              );
+            } else if (versions == null || versions.isEmpty) {
+              historyListWidget = const Padding(
+                padding: EdgeInsets.symmetric(vertical: 24),
+                child: Center(
+                  child: Text('暂无历史版本记录'),
+                ),
+              );
+            } else {
+              historyListWidget = Container(
+                width: double.maxFinite,
+                constraints: const BoxConstraints(maxHeight: 280),
+                decoration: BoxDecoration(
+                  color: colorScheme.surfaceContainerHighest.withValues(alpha: 0.15),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(
+                      color: colorScheme.outlineVariant.withValues(alpha: 0.3)),
+                ),
+                child: ListView.separated(
+                  shrinkWrap: true,
+                  padding: const EdgeInsets.symmetric(vertical: 4),
+                  itemCount: versions.length,
+                  separatorBuilder: (_, __) => Divider(
+                    height: 1,
+                    indent: 12,
+                    endIndent: 12,
+                    color: colorScheme.outlineVariant.withValues(alpha: 0.3),
+                  ),
+                  itemBuilder: (_, i) {
+                    final v = versions[i];
+                    final vProgressKey = '${v.pluginId}-${v.version}';
+                    final vIsDownloading = _downloadProgress.containsKey(vProgressKey);
+                    final vProgress = _downloadProgress[vProgressKey] ?? 0.0;
+                    final isInstalled = local?.version == v.version;
+
+                    return ListTile(
+                      dense: true,
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                      leading: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: isInstalled
+                              ? Colors.green.withValues(alpha: 0.15)
+                              : colorScheme.primaryContainer.withValues(alpha: 0.4),
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                        child: Text(
+                          'v${v.version}',
+                          style: TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                            color: isInstalled ? Colors.green : colorScheme.primary,
+                          ),
+                        ),
+                      ),
+                      title: Text(
+                        v.updatedAt.length >= 10 ? v.updatedAt.substring(0, 10) : v.updatedAt,
+                        style: TextStyle(fontSize: 11, color: colorScheme.onSurfaceVariant),
+                      ),
+                      subtitle: v.changelog.isNotEmpty
+                          ? Padding(
+                              padding: const EdgeInsets.only(top: 4),
+                              child: Text(
+                                v.changelog,
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  color: colorScheme.onSurfaceVariant.withValues(alpha: 0.7),
+                                ),
+                              ),
+                            )
+                          : null,
+                      trailing: vIsDownloading
+                          ? SizedBox(
+                              width: 60,
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  SizedBox(
+                                    width: 12,
+                                    height: 12,
+                                    child: CircularProgressIndicator(
+                                      value: vProgress > 0 ? vProgress : null,
+                                      strokeWidth: 1.5,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 4),
+                                  Text(
+                                    '${(vProgress * 100).toStringAsFixed(0)}%',
+                                    style: TextStyle(fontSize: 10, color: colorScheme.primary),
+                                  ),
+                                ],
+                              ),
+                            )
+                          : isInstalled
+                              ? Tooltip(
+                                  message: '当前已安装',
+                                  child: const Icon(Icons.check_circle, size: 16, color: Colors.green),
+                                )
+                              : TextButton(
+                                  style: TextButton.styleFrom(
+                                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                    minimumSize: Size.zero,
+                                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                                  ),
+                                  onPressed: anyDownloading
+                                      ? null
+                                      : () {
+                                          Navigator.pop(ctx);
+                                          _downloadAndInstall(v, pluginManager);
+                                        },
+                                  child: const Text('安装此版本', style: TextStyle(fontSize: 11)),
+                                ),
+                    );
+                  },
+                ),
+              );
+            }
+
+            return AlertDialog(
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+              title: Row(
+                children: [
+                  MarketPluginIconWidget(
+                    iconString: displayIcon,
+                    name: displayName,
+                    size: 40,
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          displayName,
+                          style: Theme.of(ctx).textTheme.titleLarge?.copyWith(
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          '历史版本记录',
+                          style: Theme.of(ctx).textTheme.bodySmall?.copyWith(
+                            color: colorScheme.onSurfaceVariant,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              content: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text('插件功能描述:', style: TextStyle(fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 6),
+                    Container(
+                      width: double.maxFinite,
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: colorScheme.surfaceContainerHighest.withValues(alpha: 0.2),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(
+                            color: colorScheme.outlineVariant.withValues(alpha: 0.3)),
+                      ),
+                      child: Text(
+                        displayDesc,
+                        style: Theme.of(ctx).textTheme.bodyMedium?.copyWith(
+                          color: colorScheme.onSurface,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    Row(
+                      children: [
+                        Icon(Icons.history, size: 14, color: colorScheme.onSurfaceVariant),
+                        const SizedBox(width: 4),
+                        Text(
+                          '历史记录',
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.bold,
+                            color: colorScheme.onSurfaceVariant,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    historyListWidget,
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('关闭'),
+                ),
               ],
             );
           },
@@ -1966,6 +2073,7 @@ class MarketPlugin {
   final String description;
   final String? icon;
   final List<String> tags;
+  final String changelog;
 
   const MarketPlugin({
     required this.pluginId,
@@ -1977,6 +2085,7 @@ class MarketPlugin {
     required this.description,
     this.icon,
     required this.tags,
+    required this.changelog,
   });
 
   factory MarketPlugin.fromJson(Map<String, dynamic> json) {
@@ -1995,6 +2104,7 @@ class MarketPlugin {
       description: (json['description'] ?? '').toString(),
       icon: json['icon']?.toString(),
       tags: tagsDefs,
+      changelog: (json['changelog'] ?? '').toString(),
     );
   }
 }

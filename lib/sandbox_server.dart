@@ -2,30 +2,16 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:path/path.dart' as p;
-import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 class SandboxServer {
   final Directory documentRoot;
   final int port;
   HttpServer? _server;
-  final Map<String, Database> _dbCache = {};
 
   SandboxServer({required this.documentRoot, this.port = 0});
 
   /// 服务器实际监听的端口（start() 成功后可用）
   int get actualPort => _server?.port ?? 0;
-
-  Future<Database> _getDatabase(String pluginId, String rcpluginPath) async {
-    if (_dbCache.containsKey(pluginId)) {
-      return _dbCache[pluginId]!;
-    }
-    final db = await databaseFactory.openDatabase(
-      rcpluginPath,
-      options: OpenDatabaseOptions(readOnly: true),
-    );
-    _dbCache[pluginId] = db;
-    return db;
-  }
 
   Future<int> start() async {
     _server = await HttpServer.bind(
@@ -72,8 +58,14 @@ class SandboxServer {
 
         final pluginDir = Directory(p.join(documentRoot.path, pluginId));
         if (await pluginDir.exists()) {
-          // 开发模式：直接读取文件
-          final file = File(p.join(documentRoot.path, path.substring(1)));
+          final cleanFilePath = p.normalize(filePath).replaceAll('\\', '/');
+          if (cleanFilePath.startsWith('../') || cleanFilePath == '..') {
+            request.response.statusCode = HttpStatus.forbidden;
+            request.response.write('Forbidden');
+            await request.response.close();
+            return;
+          }
+          final file = File(p.join(pluginDir.path, cleanFilePath));
 
           // 路径遍历防御：规范化后校验是否仍在沙箱根目录内
           final canonicalRoot = p.canonicalize(documentRoot.path);
@@ -87,11 +79,42 @@ class SandboxServer {
           }
 
           if (await file.exists()) {
+            // HTTP 协商缓存处理
+            final lastModified = await file.lastModified();
+            final etag = '"${lastModified.millisecondsSinceEpoch}-${await file.length()}"';
+
+            request.response.headers.set(HttpHeaders.lastModifiedHeader, lastModified);
+            request.response.headers.set('ETag', etag);
+            request.response.headers.set(HttpHeaders.cacheControlHeader, 'no-cache');
+
+            final ifNoneMatch = request.headers.value('If-None-Match');
+            final ifModifiedSinceStr = request.headers.value(HttpHeaders.ifModifiedSinceHeader);
+
+            bool notModified = false;
+            if (ifNoneMatch != null) {
+              if (ifNoneMatch == etag) {
+                notModified = true;
+              }
+            } else if (ifModifiedSinceStr != null) {
+              try {
+                final ifModifiedSince = HttpDate.parse(ifModifiedSinceStr);
+                if (lastModified.isBefore(ifModifiedSince.add(const Duration(seconds: 1)))) {
+                  notModified = true;
+                }
+              } catch (_) {}
+            }
+
+            if (notModified) {
+              request.response.statusCode = HttpStatus.notModified;
+              _setCorsHeaders(request.response);
+              await request.response.close();
+              return;
+            }
+
             final ext = p.extension(file.path).toLowerCase();
             final contentType = _getContentType(ext);
 
             request.response.headers.contentType = ContentType.parse(contentType);
-            // 使用 set 而非 add，防止 Dart HttpServer 自动添加后再追加造成重复
             _setCorsHeaders(request.response);
 
             await request.response.addStream(file.openRead());
@@ -102,63 +125,9 @@ class SandboxServer {
             await request.response.close();
           }
         } else {
-          // 发布模式：尝试加载 rcplugin 数据库文件
-          final rcpluginFile = File(p.join(documentRoot.path, '$pluginId.rcplugin'));
-          if (await rcpluginFile.exists()) {
-            // 路径防越界校验
-            final cleanFilePath = p.normalize(filePath).replaceAll('\\', '/');
-            if (cleanFilePath.startsWith('../') || cleanFilePath == '..') {
-              request.response.statusCode = HttpStatus.forbidden;
-              request.response.write('Forbidden');
-              await request.response.close();
-              return;
-            }
-
-            try {
-              final db = await _getDatabase(pluginId, rcpluginFile.path);
-              final results = await db.query(
-                'sqlar',
-                columns: ['sz', 'data'],
-                where: 'name = ?',
-                whereArgs: [cleanFilePath],
-              );
-
-              if (results.isNotEmpty) {
-                final row = results.first;
-                final sz = row['sz'] as int;
-                final data = row['data'] as Uint8List;
-
-                Uint8List contentBytes;
-                if (sz > data.length) {
-                  // deflateRaw 压缩，解密还原
-                  contentBytes = Uint8List.fromList(ZLibDecoder(raw: true).convert(data));
-                } else {
-                  contentBytes = data;
-                }
-
-                final ext = p.extension(cleanFilePath).toLowerCase();
-                final contentType = _getContentType(ext);
-
-                request.response.headers.contentType = ContentType.parse(contentType);
-                _setCorsHeaders(request.response);
-                request.response.add(contentBytes);
-                await request.response.close();
-              } else {
-                request.response.statusCode = HttpStatus.notFound;
-                request.response.write('Not Found in SQLite Archive');
-                await request.response.close();
-              }
-            } catch (e) {
-              debugPrint('[SandboxServer] Error reading sqlite archive: $e');
-              request.response.statusCode = HttpStatus.internalServerError;
-              request.response.write('Internal Server Error: $e');
-              await request.response.close();
-            }
-          } else {
-            request.response.statusCode = HttpStatus.notFound;
-            request.response.write('Not Found');
-            await request.response.close();
-          }
+          request.response.statusCode = HttpStatus.notFound;
+          request.response.write('Not Found');
+          await request.response.close();
         }
       },
       onError: (Object error, StackTrace stackTrace) {
@@ -227,28 +196,7 @@ class SandboxServer {
     };
   }
 
-  /// 关闭并释放特定插件的 SQLite 数据库连接缓存，防止 Windows 文件独占锁
-  Future<void> releaseDatabaseCache(String pluginId) async {
-    final db = _dbCache.remove(pluginId);
-    if (db != null) {
-      try {
-        await db.close();
-        debugPrint('[SandboxServer] Released database connection cache for $pluginId');
-      } catch (e) {
-        debugPrint('[SandboxServer] Error closing cached db for $pluginId: $e');
-      }
-    }
-  }
-
   Future<void> close() async {
     await _server?.close();
-    for (final db in _dbCache.values) {
-      try {
-        await db.close();
-      } catch (e) {
-        debugPrint('[SandboxServer] Error closing cached db: $e');
-      }
-    }
-    _dbCache.clear();
   }
 }
