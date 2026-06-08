@@ -1,6 +1,6 @@
 ---
-description: "HTML/CSS/JS plugins for Flutter InAppWebView with unrestricted browser APIs."
-globs: "*"
+name: plugin
+description: "HTML/CSS/JS plugins for Flutter InAppWebView with unrestricted browser APIs. This skill should be used when creating plugins, writing manifest.yml, implementing plugin UI, or organizing plugin code architecture for the Rain Curtain platform."
 ---
 
 # Rain Curtain 插件开发
