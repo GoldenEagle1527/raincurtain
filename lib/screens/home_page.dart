@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../models/plugin_manager.dart';
@@ -107,6 +108,20 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     if (consoleManager != null) {
       setState(() {
         consoleManager.toggleVisibility();
+      });
+    }
+  }
+
+  /// 切换当前插件 tab 的 webview 是手机模式还是电脑模式
+  void _toggleDeviceMode() {
+    final tabManager = context.read<TabManager>();
+    final currentTabId = tabManager.currentTab.id;
+    final currentState = _webViewKeys[currentTabId]?.currentState;
+    if (currentState != null) {
+      currentState.toggleDeviceMode().then((_) {
+        if (mounted) {
+          setState(() {});
+        }
       });
     }
   }
@@ -482,6 +497,8 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       final consolePanel = ConsolePanel(
         consoleManager: consoleManager,
         webViewController: currentState?.webViewController,
+        isMobileMode: currentState?.isMobileMode ?? false,
+        onToggleDeviceMode: _toggleDeviceMode,
         onClose: () {
           setState(() {
             consoleManager.hide();
@@ -587,14 +604,18 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       return iconWidget;
     }
 
+    final isMobile = Platform.isAndroid || Platform.isIOS;
+
     final wrapped = GestureDetector(
       behavior: HitTestBehavior.opaque,
-      onLongPressStart: (details) => _showTabContextMenu(
-        context: context,
-        tabManager: tabManager,
-        index: index,
-        globalPosition: details.globalPosition,
-      ),
+      onLongPressStart: isMobile
+          ? null
+          : (details) => _showTabContextMenu(
+                context: context,
+                tabManager: tabManager,
+                index: index,
+                globalPosition: details.globalPosition,
+              ),
       onSecondaryTapDown: (details) => _showTabContextMenu(
         context: context,
         tabManager: tabManager,
@@ -605,7 +626,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     );
 
     return Tooltip(
-      message: '长按 / 右键 可关闭',
+      message: isMobile ? tab.title : '长按 / 右键 可关闭',
       waitDuration: const Duration(milliseconds: 600),
       child: wrapped,
     );

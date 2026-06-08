@@ -21,6 +21,7 @@ import 'plugin_webview/dns_handler.dart';
 import 'plugin_webview/orientation_handler.dart';
 import 'plugin_webview/console_handler.dart';
 import '../utils/permission_utils.dart';
+import '../utils/responsive_helper.dart';
 
 /// 插件 WebView 视图
 /// 加载并显示插件的 Web 内容
@@ -65,6 +66,27 @@ class PluginWebViewState extends State<PluginWebView>
 
   /// 控制台日志管理器，用于捕获 WebView 的 console 输出
   final ConsoleManager consoleManager = ConsoleManager();
+
+  /// 是否为手机模式
+  bool isMobileMode = false;
+
+  static const String mobileUserAgent = 'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36';
+  static const String pcUserAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36';
+
+  /// 切换设备模式 (手机/电脑模式) 并更改 User Agent 重新加载
+  Future<void> toggleDeviceMode() async {
+    setState(() {
+      isMobileMode = !isMobileMode;
+    });
+    if (webViewController != null) {
+      final settings = await webViewController!.getSettings();
+      if (settings != null) {
+        settings.userAgent = isMobileMode ? mobileUserAgent : pcUserAgent;
+        await webViewController!.setSettings(settings: settings);
+        await webViewController!.reload();
+      }
+    }
+  }
 
   @override
   void initState() {
@@ -134,7 +156,7 @@ class PluginWebViewState extends State<PluginWebView>
     // 使用系统自动分配的沙盒服务器端口
     final url = 'http://localhost:$sandboxServerPort/${widget.plugin.id}/';
 
-    return Stack(
+    Widget mainView = Stack(
       children: [
         // WebView 主体
         InAppWebView(
@@ -208,6 +230,8 @@ class PluginWebViewState extends State<PluginWebView>
             mediaPlaybackRequiresUserGesture: false,
             allowsInlineMediaPlayback: true,
             javaScriptCanOpenWindowsAutomatically: true,
+            // 默认情况下若切换到手机模式，使用手机 UA，否则由系统自行分配（初始化设为 null）
+            userAgent: isMobileMode ? mobileUserAgent : null,
             // 地理位置放行
             geolocationEnabled: true,
             // Android 特有：允许混合内容（http 与 https 混用）
@@ -424,5 +448,32 @@ class PluginWebViewState extends State<PluginWebView>
           ),
       ],
     );
+
+    if (isMobileMode && !ResponsiveHelper.isCompact(context)) {
+      mainView = Container(
+        color: colorScheme.surfaceContainer,
+        child: Center(
+          child: Container(
+            width: 412,
+            margin: const EdgeInsets.symmetric(vertical: 16, horizontal: 8),
+            decoration: BoxDecoration(
+              color: colorScheme.surface,
+              borderRadius: BorderRadius.circular(24),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.15),
+                  blurRadius: 16,
+                  offset: const Offset(0, 8),
+                ),
+              ],
+            ),
+            clipBehavior: Clip.antiAlias,
+            child: mainView,
+          ),
+        ),
+      );
+    }
+
+    return mainView;
   }
 }

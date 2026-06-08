@@ -16,11 +16,19 @@ class ConsolePanel extends StatefulWidget {
   /// 关闭面板回调
   final VoidCallback onClose;
 
+  /// 是否为手机模式
+  final bool isMobileMode;
+
+  /// 切换设备模式的回调
+  final VoidCallback onToggleDeviceMode;
+
   const ConsolePanel({
     super.key,
     required this.consoleManager,
     required this.webViewController,
     required this.onClose,
+    required this.isMobileMode,
+    required this.onToggleDeviceMode,
   });
 
   @override
@@ -155,6 +163,9 @@ class _ConsolePanelState extends State<ConsolePanel> {
         children: [
           // 标题栏
           _buildHeader(colorScheme, messages.length),
+          // 模拟设备及UA工具栏
+          _buildToolBar(colorScheme),
+          const Divider(height: 1),
           // 过滤器工具栏
           _buildFilterBar(colorScheme),
           const Divider(height: 1),
@@ -507,6 +518,59 @@ class _ConsolePanelState extends State<ConsolePanel> {
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  /// 开发者工具工具栏
+  Widget _buildToolBar(ColorScheme colorScheme) {
+    return Container(
+      height: 32,
+      padding: const EdgeInsets.symmetric(horizontal: 8),
+      color: colorScheme.surfaceContainerHigh.withValues(alpha: 0.5),
+      child: Row(
+        children: [
+          _buildToolBarButton(
+            icon: widget.isMobileMode ? Icons.phone_android : Icons.computer,
+            tooltip: widget.isMobileMode ? '手机模式 (Mobile UA)' : '电脑模式 (Desktop UA)',
+            isActive: widget.isMobileMode,
+            onTap: widget.onToggleDeviceMode,
+            colorScheme: colorScheme,
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 开发者工具工具栏按钮
+  Widget _buildToolBarButton({
+    required IconData icon,
+    required String tooltip,
+    required bool isActive,
+    required VoidCallback onTap,
+    required ColorScheme colorScheme,
+  }) {
+    final activeColor = colorScheme.primary;
+    return Tooltip(
+      message: tooltip,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(4),
+        child: Container(
+          padding: const EdgeInsets.all(4),
+          decoration: BoxDecoration(
+            color: isActive ? activeColor.withValues(alpha: 0.1) : Colors.transparent,
+            borderRadius: BorderRadius.circular(4),
+            border: Border.all(
+              color: isActive ? activeColor.withValues(alpha: 0.3) : Colors.transparent,
+            ),
+          ),
+          child: Icon(
+            icon,
+            size: 16,
+            color: isActive ? activeColor : colorScheme.onSurfaceVariant,
+          ),
+        ),
       ),
     );
   }

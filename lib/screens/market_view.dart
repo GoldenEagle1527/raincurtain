@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../models/market_plugin.dart';
@@ -7,7 +8,6 @@ import '../models/plugin_manager.dart';
 import '../utils/responsive_helper.dart';
 import '../services/market_service.dart';
 import 'components/market_plugin_card.dart';
-import 'components/market_tags_filter.dart';
 
 /// 插件市场视图
 /// 使用 MD3 组件和主题色系统，重构为双 Tab 布局（已安装、在线市场）
@@ -22,14 +22,14 @@ class _MarketViewState extends State<MarketView> {
   // ── 已安装插件状态 ──
   bool _isSearching = false;
   String _searchQuery = '';
-  String _selectedLocalTag = '';
+  Set<String> _selectedLocalTags = {};
   final TextEditingController _searchController = TextEditingController();
 
   // ── 在线市场状态 ──
   List<MarketPlugin> _marketPlugins = [];
   bool _isLoadingMarket = false;
   String? _marketError;
-  String _selectedMarketTag = '';
+  Set<String> _selectedMarketTags = {};
 
   bool _isSearchingMarket = false;
   String _searchQueryMarket = '';
@@ -162,6 +162,194 @@ class _MarketViewState extends State<MarketView> {
     }
   }
 
+  /// 弹出筛选标签的模态框
+  void _showFilterDialog(
+    BuildContext context, {
+    required bool isLocal,
+    required List<String> allTags,
+    required Set<String> currentSelected,
+    required void Function(Set<String> selected) onApplied,
+    required VoidCallback onReset,
+  }) {
+    final theme = Theme.of(context);
+    final colorScheme = theme.colorScheme;
+    final tempSelected = Set<String>.from(currentSelected);
+    String tagSearchQuery = '';
+
+    showDialog(
+      context: context,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            final filteredTags = allTags
+                .where((tag) => tag.toLowerCase().contains(tagSearchQuery.toLowerCase()))
+                .toList();
+
+            return AlertDialog(
+              title: const Text('筛选标签'),
+              content: SizedBox(
+                width: 320,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    // 标签搜索框
+                    TextField(
+                      decoration: InputDecoration(
+                        hintText: '搜索标签...',
+                        prefixIcon: const Icon(Icons.search, size: 18),
+                        suffixIcon: tagSearchQuery.isNotEmpty
+                            ? IconButton(
+                                icon: const Icon(Icons.clear, size: 16),
+                                onPressed: () {
+                                  setDialogState(() {
+                                    tagSearchQuery = '';
+                                  });
+                                },
+                              )
+                            : null,
+                        isDense: true,
+                        contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                      ),
+                      onChanged: (val) {
+                        setDialogState(() {
+                          tagSearchQuery = val;
+                        });
+                      },
+                    ),
+                    const SizedBox(height: 12),
+                    // 标签 Wrap 区域
+                    if (filteredTags.isEmpty)
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 24),
+                        child: Center(
+                          child: Text(
+                            '未找到匹配的标签',
+                            style: TextStyle(
+                              color: colorScheme.onSurfaceVariant.withValues(alpha: 0.7),
+                              fontSize: 13,
+                            ),
+                          ),
+                        ),
+                      )
+                    else
+                      Flexible(
+                        child: SingleChildScrollView(
+                          child: Wrap(
+                            spacing: 8,
+                            runSpacing: 8,
+                            children: filteredTags.map((tag) {
+                              final isSelected = tempSelected.contains(tag);
+                              return FilterChip(
+                                label: Text(tag),
+                                selected: isSelected,
+                                onSelected: (selected) {
+                                  setDialogState(() {
+                                    if (selected) {
+                                      tempSelected.add(tag);
+                                    } else {
+                                      tempSelected.remove(tag);
+                                    }
+                                  });
+                                },
+                              );
+                            }).toList(),
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () {
+                    Navigator.pop(context);
+                    onReset();
+                  },
+                  child: Text(
+                    '重置全部',
+                    style: TextStyle(color: colorScheme.error),
+                  ),
+                ),
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('取消'),
+                ),
+                FilledButton(
+                  onPressed: () {
+                    Navigator.pop(context);
+                    onApplied(tempSelected);
+                  },
+                  child: const Text('应用'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  /// 构建主页面“已选筛选”快捷指示条
+  Widget _buildActiveFiltersIndicator(
+    BuildContext context, {
+    required Set<String> selectedTags,
+    required void Function(String tag) onRemoveTag,
+    required VoidCallback onClearAll,
+  }) {
+    if (selectedTags.isEmpty) return const SizedBox.shrink();
+
+    final theme = Theme.of(context);
+    final colorScheme = theme.colorScheme;
+
+    return Container(
+      height: 32,
+      margin: const EdgeInsets.only(bottom: 8),
+      child: Row(
+        children: [
+          Icon(Icons.filter_alt, size: 16, color: colorScheme.primary),
+          const SizedBox(width: 4),
+          Text(
+            '已选筛选：',
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.bold,
+              color: colorScheme.onSurfaceVariant,
+            ),
+          ),
+          const SizedBox(width: 4),
+          Expanded(
+            child: ListView(
+              scrollDirection: Axis.horizontal,
+              children: selectedTags.map((tag) {
+                return Padding(
+                  padding: const EdgeInsets.only(right: 6),
+                  child: RawChip(
+                    label: Text(tag, style: const TextStyle(fontSize: 11)),
+                    onDeleted: () => onRemoveTag(tag),
+                    visualDensity: VisualDensity.compact,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(16),
+                      side: BorderSide(color: colorScheme.outlineVariant, width: 0.8),
+                    ),
+                  ),
+                );
+              }).toList(),
+            ),
+          ),
+          TextButton(
+            onPressed: onClearAll,
+            child: const Text(
+              '清除全部',
+              style: TextStyle(fontSize: 11),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   /// 根据已安装搜索关键词与标签过滤插件列表
   List<LocalPlugin> _filterPlugins(List<LocalPlugin> plugins) {
     var list = plugins;
@@ -175,8 +363,8 @@ class _MarketViewState extends State<MarketView> {
             plugin.manifest.tags.any((t) => t.toLowerCase().contains(query));
       }).toList();
     }
-    if (_selectedLocalTag.isNotEmpty) {
-      list = list.where((plugin) => plugin.manifest.tags.contains(_selectedLocalTag)).toList();
+    if (_selectedLocalTags.isNotEmpty) {
+      list = list.where((plugin) => _selectedLocalTags.every((tag) => plugin.manifest.tags.contains(tag))).toList();
     }
     return list;
   }
@@ -306,13 +494,16 @@ class _MarketViewState extends State<MarketView> {
         // 智能刷新动作
         Builder(
           builder: (context) {
+            final isMobile = Platform.isAndroid || Platform.isIOS;
             return GestureDetector(
-              onLongPressStart: (details) {
-                final tabController = DefaultTabController.of(context);
-                if (tabController.index == 0) {
-                  _showRefreshMenu(context, details.globalPosition, pluginManager);
-                }
-              },
+              onLongPressStart: isMobile
+                  ? null
+                  : (details) {
+                      final tabController = DefaultTabController.of(context);
+                      if (tabController.index == 0) {
+                        _showRefreshMenu(context, details.globalPosition, pluginManager);
+                      }
+                    },
               onSecondaryTapDown: (details) {
                 final tabController = DefaultTabController.of(context);
                 if (tabController.index == 0) {
@@ -321,7 +512,7 @@ class _MarketViewState extends State<MarketView> {
               },
               child: IconButton(
                 icon: const Icon(Icons.refresh),
-                tooltip: '刷新列表 (长按/右键可强制重载)',
+                tooltip: isMobile ? '刷新列表' : '刷新列表 (长按/右键可强制重载)',
                 onPressed: () {
                   final tabController = DefaultTabController.of(context);
                   if (tabController.index == 0) {
@@ -361,6 +552,35 @@ class _MarketViewState extends State<MarketView> {
               ),
             ),
             IconButton(
+              icon: Badge(
+                isLabelVisible: _selectedLocalTags.isNotEmpty,
+                label: Text('${_selectedLocalTags.length}'),
+                child: const Icon(Icons.filter_alt_outlined),
+              ),
+              tooltip: '筛选标签',
+              onPressed: () {
+                final allTags = plugins.expand((p) => p.manifest.tags).toSet().toList();
+                _showFilterDialog(
+                  context,
+                  isLocal: true,
+                  allTags: allTags,
+                  currentSelected: _selectedLocalTags,
+                  onApplied: (selected) {
+                    setState(() {
+                      _selectedLocalTags = selected;
+                    });
+                  },
+                  onReset: () {
+                    setState(() {
+                      _selectedLocalTags = {};
+                      _searchQuery = '';
+                      _searchController.clear();
+                    });
+                  },
+                );
+              },
+            ),
+            IconButton(
               icon: Icon(_isSearching ? Icons.search_off : Icons.search),
               tooltip: _isSearching ? '关闭搜索' : '搜索插件',
               onPressed: () {
@@ -380,12 +600,19 @@ class _MarketViewState extends State<MarketView> {
           _buildSearchBar(context, colorScheme),
         ],
         const SizedBox(height: 8),
-        MarketTagsFilter(
-          tags: plugins.expand((p) => p.manifest.tags).toSet().toList(),
-          selectedTag: _selectedLocalTag,
-          onTagSelected: (tag) {
+        _buildActiveFiltersIndicator(
+          context,
+          selectedTags: _selectedLocalTags,
+          onRemoveTag: (tag) {
             setState(() {
-              _selectedLocalTag = tag;
+              _selectedLocalTags.remove(tag);
+            });
+          },
+          onClearAll: () {
+            setState(() {
+              _selectedLocalTags = {};
+              _searchQuery = '';
+              _searchController.clear();
             });
           },
         ),
@@ -406,9 +633,9 @@ class _MarketViewState extends State<MarketView> {
     ColorScheme colorScheme,
     double padding,
   ) {
-    final filteredMarket = _selectedMarketTag.isEmpty
+    final filteredMarket = _selectedMarketTags.isEmpty
         ? _marketPlugins
-        : _marketPlugins.where((p) => p.tags.contains(_selectedMarketTag)).toList();
+        : _marketPlugins.where((p) => _selectedMarketTags.every((tag) => p.tags.contains(tag))).toList();
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -422,6 +649,36 @@ class _MarketViewState extends State<MarketView> {
                   color: colorScheme.onSurfaceVariant,
                 ),
               ),
+            ),
+            IconButton(
+              icon: Badge(
+                isLabelVisible: _selectedMarketTags.isNotEmpty,
+                label: Text('${_selectedMarketTags.length}'),
+                child: const Icon(Icons.filter_alt_outlined),
+              ),
+              tooltip: '筛选标签',
+              onPressed: () {
+                final allTags = _marketPlugins.expand((p) => p.tags).toSet().toList();
+                _showFilterDialog(
+                  context,
+                  isLocal: false,
+                  allTags: allTags,
+                  currentSelected: _selectedMarketTags,
+                  onApplied: (selected) {
+                    setState(() {
+                      _selectedMarketTags = selected;
+                    });
+                  },
+                  onReset: () {
+                    setState(() {
+                      _selectedMarketTags = {};
+                      _searchQueryMarket = '';
+                      _searchControllerMarket.clear();
+                    });
+                    _fetchMarketPlugins();
+                  },
+                );
+              },
             ),
             IconButton(
               icon: Icon(
@@ -445,13 +702,21 @@ class _MarketViewState extends State<MarketView> {
           _buildOnlineSearchBar(context, colorScheme),
         ],
         const SizedBox(height: 8),
-        MarketTagsFilter(
-          tags: _marketPlugins.expand((p) => p.tags).toSet().toList(),
-          selectedTag: _selectedMarketTag,
-          onTagSelected: (tag) {
+        _buildActiveFiltersIndicator(
+          context,
+          selectedTags: _selectedMarketTags,
+          onRemoveTag: (tag) {
             setState(() {
-              _selectedMarketTag = tag;
+              _selectedMarketTags.remove(tag);
             });
+          },
+          onClearAll: () {
+            setState(() {
+              _selectedMarketTags = {};
+              _searchQueryMarket = '';
+              _searchControllerMarket.clear();
+            });
+            _fetchMarketPlugins();
           },
         ),
         const SizedBox(height: 12),
@@ -579,7 +844,7 @@ class _MarketViewState extends State<MarketView> {
   /// 构建本地空状态
   Widget _buildEmptyState(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
-    final hasFilter = _searchQuery.isNotEmpty || _selectedLocalTag.isNotEmpty;
+    final hasFilter = _searchQuery.isNotEmpty || _selectedLocalTags.isNotEmpty;
 
     return Center(
       child: Column(
@@ -612,7 +877,7 @@ class _MarketViewState extends State<MarketView> {
   /// 构建在线空状态
   Widget _buildOnlineEmptyState(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
-    final hasFilter = _searchQueryMarket.isNotEmpty || _selectedMarketTag.isNotEmpty;
+    final hasFilter = _searchQueryMarket.isNotEmpty || _selectedMarketTags.isNotEmpty;
 
     return Center(
       child: Column(
