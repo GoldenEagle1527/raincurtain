@@ -50,7 +50,7 @@ bool FlutterWindow::OnCreate() {
   auto hotkey_manager = std::make_unique<HotkeyManager>(GetHandle());
   
   hotkey_manager->SetHotkeyCallback([this]() {
-    this->ShowAndActivate();
+    this->ToggleVisibility();
   });
   
   SetHotkeyManager(std::move(hotkey_manager));

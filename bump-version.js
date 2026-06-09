@@ -7,13 +7,28 @@
 const fs = require("fs");
 const path = require("path");
 
+const root = __dirname;
+
+// 自动获取 pubspec.yaml 中当前的 build 号并自增
+let currentBuild = 1;
+try {
+  const pubspecPath = path.join(root, "pubspec.yaml");
+  if (fs.existsSync(pubspecPath)) {
+    const pubspecText = fs.readFileSync(pubspecPath, "utf-8");
+    const match = pubspecText.match(/^version:\s*\S+\+(\d+)$/m);
+    if (match) {
+      currentBuild = parseInt(match[1], 10);
+    }
+  }
+} catch (e) {
+  console.log("  [提示] 读取当前 build 号失败，将使用默认值 1");
+}
+
 // ★★★ 在这里修改版本号 ★★★
-const VERSION = "1.3.2";
-const BUILD = 2; // pubspec.yaml 的 build number (+N)
+const VERSION = "1.3.3";
+const BUILD = currentBuild + 1; // 自动在当前版本基础上自增
 
 // ========================================
-
-const root = __dirname;
 
 function patchFile(relPath, replacements) {
   const filePath = path.join(root, relPath);

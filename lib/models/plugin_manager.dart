@@ -198,12 +198,19 @@ class PluginManager extends ChangeNotifier {
     // 扫描沙箱目录
     final entities = await sandboxDir.list().toList();
     for (final entity in entities) {
+      Directory? pluginDir;
       if (entity is Directory) {
-        final pluginId = p.basename(entity.path);
+        pluginDir = entity;
+      } else if (entity is Link) {
+        pluginDir = Directory(entity.path);
+      }
+
+      if (pluginDir != null) {
+        final pluginId = p.basename(pluginDir.path);
         if (registeredIds.contains(pluginId)) continue;
 
         // 发现未注册的文件夹
-        final manifestFile = File(p.join(entity.path, 'manifest.yml'));
+        final manifestFile = File(p.join(pluginDir.path, 'manifest.yml'));
         if (await manifestFile.exists()) {
           try {
             final content = await manifestFile.readAsString();

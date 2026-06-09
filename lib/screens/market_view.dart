@@ -1249,14 +1249,27 @@ class _MarketViewState extends State<MarketView> {
     final displayDesc = plugin.description.isNotEmpty ? plugin.description : '暂无功能描述。';
     final displayIcon = plugin.icon;
 
+    StateSetter? dialogState;
+    BuildContext? dialogContext;
+
     // 触发预拉取历史版本（若尚未缓存）
-    _fetchPluginVersions(plugin.pluginId);
+    _fetchPluginVersions(
+      plugin.pluginId,
+      onDone: () {
+        if (dialogContext != null && dialogContext!.mounted && dialogState != null) {
+          dialogState!(() {});
+        }
+      },
+    );
 
     showDialog(
       context: context,
       builder: (ctx) {
         return StatefulBuilder(
           builder: (ctx, setDialogState) {
+            dialogState = setDialogState;
+            dialogContext = ctx;
+
             final anyDownloading = _downloadProgress.keys
                 .any((k) => k.startsWith('${plugin.pluginId}-'));
 

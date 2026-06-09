@@ -347,7 +347,11 @@ void Win32Window::Hide() {
 }
 
 void Win32Window::ToggleVisibility() {
-  if (IsVisible()) {
+  HWND foreground = GetForegroundWindow();
+  bool is_foreground = (foreground == window_handle_);
+  bool is_minimized = IsIconic(window_handle_);
+
+  if (IsVisible() && is_foreground && !is_minimized) {
     Hide();
   } else {
     ShowAndActivate();

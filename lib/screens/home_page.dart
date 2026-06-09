@@ -165,13 +165,37 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   Widget build(BuildContext context) {
     return Consumer<TabManager>(
       builder: (context, tabManager, child) {
+        final currentTab = tabManager.currentTab;
+        final appModeManager = context.watch<AppModeManager>();
+        final isStreamMode = appModeManager.isStreamMode;
+        final isPluginTab = !isStreamMode && currentTab.plugin != null;
+
+        Widget layout;
         if (ResponsiveHelper.shouldUseDrawer(context)) {
-          return _buildCompactLayout(context, tabManager);
+          layout = _buildCompactLayout(context, tabManager);
         } else if (ResponsiveHelper.shouldUseNavigationRail(context)) {
-          return _buildMediumLayout(context, tabManager);
+          layout = _buildMediumLayout(context, tabManager);
         } else {
-          return _buildLargeLayout(context, tabManager);
+          layout = _buildLargeLayout(context, tabManager);
         }
+
+        return PopScope(
+          canPop: !isPluginTab,
+          onPopInvokedWithResult: (didPop, result) async {
+            if (didPop) return;
+            
+            // 尝试让当前 WebView 返回上一页
+            final currentState = _webViewKeys[currentTab.id]?.currentState;
+            final webController = currentState?.webViewController;
+            if (webController != null && await webController.canGoBack()) {
+              await webController.goBack();
+            } else {
+              // 否则，返回到主页面（应用市场标签页）
+              tabManager.switchToTab(0);
+            }
+          },
+          child: layout,
+        );
       },
     );
   }
