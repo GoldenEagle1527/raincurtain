@@ -132,9 +132,9 @@ mixin FetchMixin {
               await parent.create(recursive: true);
             }
             final raf = await file.open(mode: FileMode.write);
-            await response.forEach((chunk) async {
+            await for (final chunk in response) {
               await raf.writeFrom(chunk);
-            });
+            }
             await raf.close();
           } else {
             client.close();
@@ -158,9 +158,9 @@ mixin FetchMixin {
           final response = await request.close();
           if (response.statusCode >= 200 && response.statusCode < 300) {
             final raf = await tempFile.open(mode: FileMode.write);
-            await response.forEach((chunk) async {
+            await for (final chunk in response) {
               await raf.writeFrom(chunk);
-            });
+            }
             await raf.close();
             client.close();
             bytesToSave = await tempFile.readAsBytes();

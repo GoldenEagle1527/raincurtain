@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import '../models/plugin_manager.dart';
 import '../models/console_manager.dart';
+import '../models/plugin_storage_manager.dart';
 import '../main.dart' show sandboxServerPort;
 
 // 子模块导入
@@ -63,6 +64,7 @@ class PluginWebViewState extends State<PluginWebView>
   bool hasError = false;
   String? errorMessage;
   ThemeData? _currentTheme;
+  bool _isDbReady = false;
 
   /// 控制台日志管理器，用于捕获 WebView 的 console 输出
   final ConsoleManager consoleManager = ConsoleManager();
@@ -96,6 +98,26 @@ class PluginWebViewState extends State<PluginWebView>
     initWsManager(() => webViewController, () => mounted);
     initUdpManager(() => webViewController, () => mounted);
     initDnsManager();
+    _ensurePluginStorageSchema();
+  }
+
+  Future<void> _ensurePluginStorageSchema() async {
+    final manifest = widget.plugin.manifest;
+    if (manifest.storage.isNotEmpty) {
+      try {
+        await PluginStorageManager.instance.ensureTablesForPlugin(
+          manifest.id,
+          manifest.storage,
+        );
+      } catch (e) {
+        debugPrint('Failed to ensure database tables for plugin ${widget.plugin.id}: $e');
+      }
+    }
+    if (mounted) {
+      setState(() {
+        _isDbReady = true;
+      });
+    }
   }
 
   @override
@@ -152,7 +174,21 @@ class PluginWebViewState extends State<PluginWebView>
   @override
   Widget build(BuildContext context) {
     super.build(context); // AutomaticKeepAliveClientMixin 要求
+    
+    final manifest = widget.plugin.manifest;
+    final needsDb = manifest.storage.isNotEmpty;
+    final isReady = !needsDb || _isDbReady;
+    
     final colorScheme = Theme.of(context).colorScheme;
+    if (!isReady) {
+      return Scaffold(
+        backgroundColor: colorScheme.surface,
+        body: const Center(
+          child: CircularProgressIndicator(),
+        ),
+      );
+    }
+
     // 使用系统自动分配的沙盒服务器端口
     final url = 'http://localhost:$sandboxServerPort/${widget.plugin.id}/';
 

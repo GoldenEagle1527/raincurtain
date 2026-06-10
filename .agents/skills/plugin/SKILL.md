@@ -166,6 +166,29 @@ try {
 
 网络请求同样需要异常处理，在 UI 上给予加载失败、空状态等友好提示。
 
+## 文件下载最佳实践
+
+在插件中下载视频、音频或其它大文件到本地时，为保证跨平台性能与稳定性，必须遵循以下规范：
+
+- **优先使用动态 `<a>` 标签触发下载**：
+  直接使用原生 JS 动态创建具有 `download` 属性的 `<a>` 标签并模拟点击，交由 RainCurtain 底层统一拦截并交给原生 Flutter 线程处理：
+  ```javascript
+  const a = document.createElement("a");
+  a.href = fileUrl;
+  a.download = suggestedFilename;
+  a.style.display = "none";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  ```
+  这样做可以利用 Flutter 原生端直接流式写入文件，规避 JS 侧大文件内存驻留和跨 bridge 传输大 Base64 数据带来的性能与兼容性风险，并且会自动触发平台统一的保存成功提示（SnackBar）。
+
+- **避免手动拉起 `showSaveFilePicker` 进行手动写入**：
+  严禁在插件 JS 代码中手动 `fetch` 大文件数据并使用 `showSaveFilePicker` 句柄进行前端分块 `write` 和 `close`。这种方案在大文件下极易引发桥接通道阻塞、内存溢出或静默失败。
+
+- **宿主原生端 Stream 写入规范**：
+  在宿主 Dart 代码（如处理底层拦截下载的 Handler）中，从网络响应 Stream 写入 `RandomAccessFile` 时，**严禁**使用并发的 `response.forEach` 异步回调。必须使用 `await for (final chunk in response)` 进行串行写入，防止由于并发异步写入同一文件句柄导致 `FileSystemException: An async operation is currently pending` 崩溃。
+
 ## 平台兼容性
 
 - 使用标准 Web API 确保跨平台兼容
