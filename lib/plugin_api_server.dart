@@ -13,7 +13,7 @@ import 'models/plugin_manager.dart';
 class PluginApiServer {
   static const int kPort = 19280;
   static const String kApiVersion = '1.0.0';
-  static const String kAppVersion = '1.3.4+5';
+  static const String kAppVersion = '1.3.5+6';
 
   final PluginManager pluginManager;
   HttpServer? _server;
