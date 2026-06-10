@@ -74,6 +74,15 @@ await RainCurtain.storage.delete("table", where);
 await RainCurtain.storage.count("table", where);
 await RainCurtain.storage.clear("table");
 
+// 专属文件存储（支持文本/二进制，插件强隔离且安全防路径遍历）
+await RainCurtain.personalStorage.writeText("config.json", JSON.stringify(data));
+await RainCurtain.personalStorage.writeBinary("image.png", base64Data);
+const text = await RainCurtain.personalStorage.readText("config.json");
+const base64 = await RainCurtain.personalStorage.readBinary("image.png");
+const fileList = await RainCurtain.personalStorage.list("sub_dir"); // 返回 [{name, kind, path}]
+const exists = await RainCurtain.personalStorage.exists("config.json");
+await RainCurtain.personalStorage.delete("config.json");
+
 // 网络请求（系统自动绕过 CORS）
 const resp = await fetch("https://api.example.com/data");
 ```

@@ -504,6 +504,17 @@ class PluginManager extends ChangeNotifier {
     await _deletePluginFiles(pluginId);
     await PluginStorageManager.instance.dropTablesForPlugin(pluginId);
 
+    // 清理专属存储物理目录
+    try {
+      final supportDir = await getApplicationSupportDirectory();
+      final personalStorageDir = Directory(p.join(supportDir.path, 'RainCurtainPersonalStorage', pluginId));
+      if (await personalStorageDir.exists()) {
+        await personalStorageDir.delete(recursive: true);
+      }
+    } catch (e) {
+      debugPrint('Failed to delete personal storage directory for $pluginId on uninstall: $e');
+    }
+
     _plugins.removeWhere((p) => p.id == pluginId);
     await _savePlugins();
     notifyListeners();

@@ -1,4 +1,7 @@
+import 'dart:io';
 import 'package:flutter/foundation.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 
 import 'database_manager.dart';
 import 'plugin_storage_manager.dart';
@@ -85,6 +88,18 @@ class PluginDataManager extends ChangeNotifier {
   /// 清除插件的存储数据（删除所有表）
   Future<void> clearStorageForPlugin(String pluginId) async {
     await pluginStorageManager.dropTablesForPlugin(pluginId);
+
+    // 清理专属存储物理目录
+    try {
+      final supportDir = await getApplicationSupportDirectory();
+      final personalStorageDir = Directory(p.join(supportDir.path, 'RainCurtainPersonalStorage', pluginId));
+      if (await personalStorageDir.exists()) {
+        await personalStorageDir.delete(recursive: true);
+      }
+    } catch (e) {
+      debugPrint('Failed to delete personal storage directory for $pluginId on clear: $e');
+    }
+
     notifyListeners();
     debugPrint('Storage cleared for plugin: $pluginId');
   }

@@ -170,3 +170,61 @@ await upsert('settings', { key: 'theme' }, { key: 'theme', value: 'dark' });
 | **修改列类型** | 删除并重建整个表 | **数据丢失** |
 
 简单来说：只要不改变已有列的类型，用户数据就不会丢失。如果需要变更列类型，应当通知用户数据会被清除。
+
+## 专属文件存储 (personalStorage)
+
+为满足插件往本地写入各种非结构化文件（如配置文件、临时生成的图片、导出的文本等）的需求，雨幕提供了 `RainCurtain.personalStorage` 接口。
+
+### 特点
+- **插件强隔离**：系统会自动为每个插件分配专属物理沙箱文件夹，目录位于 `<ApplicationSupportDirectory>/RainCurtainPersonalStorage/<pluginId>`。
+- **安全路径校验**：所有路径操作均会在 Dart 原生侧规范化后，强制检查其是否处于该插件的专属沙箱文件夹中，任何利用 `..` 等进行的路径遍历越界操作均会被直接拒绝并抛出异常。
+- **物理自动清理**：当用户卸载插件或清空插件数据时，该插件的专属物理文件存储目录将被一并物理删除。
+
+### API 列表及调用示例
+
+#### 1. 写入文本文件 (`writeText`)
+```javascript
+// 写入文本或 JSON 内容（父目录不存在时会自动创建）
+const result = await RainCurtain.personalStorage.writeText("configs/user_config.json", JSON.stringify(configData));
+// 返回: { success: true } 或 { success: false, error: "错误信息" }
+```
+
+#### 2. 写入二进制文件 (`writeBinary`)
+```javascript
+// 写入 Base64 编码的二进制数据（常用于图片、音频等流式或大文件缓存）
+const base64Data = "iVBORw0KGgoAAAANSUhEUgAA..."; // Base64 编码的 PNG
+const result = await RainCurtain.personalStorage.writeBinary("assets/logo.png", base64Data);
+// 返回: { success: true } 或 { success: false, error: "错误信息" }
+```
+
+#### 3. 读取文本文件 (`readText`)
+```javascript
+const text = await RainCurtain.personalStorage.readText("configs/user_config.json");
+// 返回: string (文件内容)。如果文件不存在或读取失败，则返回 null
+```
+
+#### 4. 读取二进制文件 (`readBinary`)
+```javascript
+const base64 = await RainCurtain.personalStorage.readBinary("assets/logo.png");
+// 返回: Base64 编码的字符串。如果文件不存在，则返回 null
+```
+
+#### 5. 检查文件或目录是否存在 (`exists`)
+```javascript
+const isExist = await RainCurtain.personalStorage.exists("configs/user_config.json");
+// 返回: boolean (true 或 false)
+```
+
+#### 6. 列出目录内容 (`list`)
+```javascript
+const entries = await RainCurtain.personalStorage.list("configs");
+// 返回: [{ name: "user_config.json", kind: "file", path: "configs/user_config.json" }, ...]
+// 其中 path 是相对于专属存储根目录的相对路径。
+```
+
+#### 7. 删除文件或目录 (`delete`)
+```javascript
+const result = await RainCurtain.personalStorage.delete("configs");
+// 会递归删除整个 "configs" 文件夹及其包含的所有内容
+// 返回: { success: true } 或 { success: false, error: "错误信息" }
+```
