@@ -11,25 +11,7 @@ class PluginStorageCRUD {
 
   // ─── Schema 验证 ──────────────────────────────────────────
 
-  bool _isValidTable(String pluginId, String tableName) {
-    final tables = _schemaCache[pluginId];
-    if (tables == null) return false;
-    return tables.any((t) => t.name == tableName);
-  }
 
-  StorageTableDefinition? _getTableDef(String pluginId, String tableName) {
-    final tables = _schemaCache[pluginId];
-    if (tables == null) return null;
-    for (final t in tables) {
-      if (t.name == tableName) return t;
-    }
-    return null;
-  }
-
-  bool _isValidColumn(StorageTableDefinition tableDef, String columnName) {
-    if (columnName == '_id') return true;
-    return tableDef.columns.any((c) => c.name == columnName);
-  }
 
   StorageColumnDefinition? _getColumnDef(
       StorageTableDefinition tableDef, String columnName) {
@@ -39,222 +21,72 @@ class PluginStorageCRUD {
     return null;
   }
 
-  // ─── CRUD 操作 ──────────────────────────────────────────
 
-  Future<int> insert(
-      String pluginId, String tableName, List<Map<String, dynamic>> rows) async {
-    if (!_isValidTable(pluginId, tableName)) {
-      throw ArgumentError('Invalid table "$tableName" for plugin $pluginId');
-    }
 
-    final tableDef = _getTableDef(pluginId, tableName)!;
-    final fullName = PluginStorageLifecycle.dbTableName(pluginId, tableName);
-    int insertedCount = 0;
+  // ─── 原生 SQL 执行 ──────────────────────────────────────
 
-    await _db.transaction((txn) async {
-      final batch = txn.batch();
-      for (final row in rows) {
-        final sanitized = _sanitizeRow(tableDef, row);
-        batch.insert(fullName, sanitized);
+  /// 执行原生 SQL 语句（完全解禁，支持所有 SQL 语法）
+  /// 自动将逻辑表名改写为插件隔离的物理表名
+  Future<dynamic> executeSql(
+    String pluginId,
+    String sql,
+    List<Object?> params,
+  ) async {
+    // 表名改写：将插件可见的逻辑表名替换为带前缀的物理隔离表名
+    final rewrittenSql = _rewriteTableNames(pluginId, sql);
+
+    // 判断语句类型
+    final trimmed = rewrittenSql.trimLeft().toUpperCase();
+    if (trimmed.startsWith('SELECT') || trimmed.startsWith('WITH') || trimmed.startsWith('PRAGMA') || trimmed.startsWith('EXPLAIN')) {
+      // 只读查询
+      final rows = await _db.rawQuery(rewrittenSql, params);
+      // 尝试对结果做 boolean 转换
+      final tableDef = _findTableDefForQuery(pluginId, sql);
+      if (tableDef != null) {
+        return rows.map((row) => _convertRowFromDb(tableDef, row)).toList();
       }
-      final results = await batch.commit();
-      insertedCount = results.length;
-    });
-
-    return insertedCount;
+      return rows.map((row) => Map<String, dynamic>.from(row)).toList();
+    } else {
+      // DML: INSERT/UPDATE/DELETE/REPLACE 及其他
+      final changes = await _db.rawUpdate(rewrittenSql, params);
+      return {'changes': changes};
+    }
   }
 
-  Future<List<Map<String, dynamic>>> query(
-    String pluginId,
-    String tableName, {
-    Map<String, dynamic>? where,
-    String? orderBy,
-    int? limit,
-    int? offset,
-  }) async {
-    final fullName = PluginStorageLifecycle.dbTableName(pluginId, tableName);
-    final tableDef = _getTableDef(pluginId, tableName);
+  /// 将 SQL 中的逻辑表名替换为物理隔离表名
+  String _rewriteTableNames(String pluginId, String sql) {
+    final tables = _schemaCache[pluginId];
+    if (tables == null || tables.isEmpty) return sql;
 
-    if (tableDef != null) {
-      String? whereClause;
-      List<Object?>? whereArgs;
+    // 按表名长度降序排列，防止短名匹配到长名的子串
+    final sortedTables = List<StorageTableDefinition>.from(tables)
+      ..sort((a, b) => b.name.length.compareTo(a.name.length));
 
-      if (where != null && where.isNotEmpty) {
-        final result = _buildWhereClause(tableDef, where);
-        whereClause = result.$1;
-        whereArgs = result.$2;
-      }
-
-      String? safeOrderBy;
-      if (orderBy != null && orderBy.isNotEmpty) {
-        safeOrderBy = _sanitizeOrderBy(tableDef, orderBy);
-      }
-
-      final rows = await _db.query(
+    String result = sql;
+    for (final table in sortedTables) {
+      final fullName = PluginStorageLifecycle.dbTableName(pluginId, table.name);
+      // 使用 word boundary 正则替换，避免部分匹配
+      result = result.replaceAll(
+        RegExp('\\b${RegExp.escape(table.name)}\\b'),
         fullName,
-        where: whereClause,
-        whereArgs: whereArgs,
-        orderBy: safeOrderBy,
-        limit: limit,
-        offset: offset,
       );
-
-      return rows.map((row) => _convertRowFromDb(tableDef, row)).toList();
     }
-
-    final tableExists = await _db.rawQuery(
-      "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
-      [fullName],
-    );
-    if (tableExists.isEmpty) return [];
-
-    final safeNameRegex = RegExp(r'^[a-zA-Z_][a-zA-Z0-9_]*$');
-
-    String sql = 'SELECT * FROM $fullName';
-    List<Object?>? args;
-
-    if (where != null && where.isNotEmpty) {
-      final clauses = <String>[];
-      args = <Object?>[];
-      for (final entry in where.entries) {
-        if (!safeNameRegex.hasMatch(entry.key)) {
-          debugPrint('Invalid key in loose-mode where: ${entry.key}, skipping');
-          continue;
-        }
-        clauses.add('${entry.key} = ?');
-        args.add(entry.value);
-      }
-      if (clauses.isNotEmpty) {
-        sql += ' WHERE ${clauses.join(' AND ')}';
-      }
-    }
-
-    if (orderBy != null && orderBy.isNotEmpty) {
-      final orderParts = orderBy.split(',');
-      final sanitizedOrder = <String>[];
-      for (final part in orderParts) {
-        final trimmed = part.trim();
-        if (trimmed.isEmpty) continue;
-        final tokens = trimmed.split(RegExp(r'\s+'));
-        final colName = tokens[0];
-        final direction =
-            tokens.length > 1 ? tokens[1].toUpperCase() : 'ASC';
-        if (!safeNameRegex.hasMatch(colName)) {
-          debugPrint('Invalid column in loose-mode orderBy: $colName, skipping');
-          continue;
-        }
-        if (direction != 'ASC' && direction != 'DESC') {
-          sanitizedOrder.add('$colName ASC');
-        } else {
-          sanitizedOrder.add('$colName $direction');
-        }
-      }
-      if (sanitizedOrder.isNotEmpty) {
-        sql += ' ORDER BY ${sanitizedOrder.join(', ')}';
-      }
-    }
-    if (limit != null) {
-      sql += ' LIMIT $limit';
-      if (offset != null) {
-        sql += ' OFFSET $offset';
-      }
-    }
-
-    return await _db.rawQuery(sql, args);
+    return result;
   }
 
-  Future<int> update(
-    String pluginId,
-    String tableName,
-    Map<String, dynamic> values,
-    Map<String, dynamic>? where,
-  ) async {
-    if (!_isValidTable(pluginId, tableName)) {
-      throw ArgumentError('Invalid table "$tableName" for plugin $pluginId');
+  /// 尝试从 SQL 中推断查询的目标表定义（用于 boolean 转换）
+  StorageTableDefinition? _findTableDefForQuery(String pluginId, String sql) {
+    final tables = _schemaCache[pluginId];
+    if (tables == null) return null;
+
+    final upperSql = sql.toUpperCase();
+    // 简单匹配：FROM 后面的第一个表名
+    for (final table in tables) {
+      if (upperSql.contains(RegExp('\\bFROM\\s+${RegExp.escape(table.name.toUpperCase())}\\b'))) {
+        return table;
+      }
     }
-
-    final tableDef = _getTableDef(pluginId, tableName)!;
-    final fullName = PluginStorageLifecycle.dbTableName(pluginId, tableName);
-
-    final sanitizedValues = _sanitizeRow(tableDef, values);
-
-    String? whereClause;
-    List<Object?>? whereArgs;
-
-    if (where != null && where.isNotEmpty) {
-      final result = _buildWhereClause(tableDef, where);
-      whereClause = result.$1;
-      whereArgs = result.$2;
-    }
-
-    return await _db.update(
-      fullName,
-      sanitizedValues,
-      where: whereClause,
-      whereArgs: whereArgs,
-    );
-  }
-
-  Future<int> delete(
-    String pluginId,
-    String tableName,
-    Map<String, dynamic>? where,
-  ) async {
-    if (!_isValidTable(pluginId, tableName)) {
-      throw ArgumentError('Invalid table "$tableName" for plugin $pluginId');
-    }
-
-    final tableDef = _getTableDef(pluginId, tableName)!;
-    final fullName = PluginStorageLifecycle.dbTableName(pluginId, tableName);
-
-    String? whereClause;
-    List<Object?>? whereArgs;
-
-    if (where != null && where.isNotEmpty) {
-      final result = _buildWhereClause(tableDef, where);
-      whereClause = result.$1;
-      whereArgs = result.$2;
-    }
-
-    return await _db.delete(
-      fullName,
-      where: whereClause,
-      whereArgs: whereArgs,
-    );
-  }
-
-  Future<int> count(
-    String pluginId,
-    String tableName,
-    Map<String, dynamic>? where,
-  ) async {
-    if (!_isValidTable(pluginId, tableName)) {
-      throw ArgumentError('Invalid table "$tableName" for plugin $pluginId');
-    }
-
-    final tableDef = _getTableDef(pluginId, tableName)!;
-    final fullName = PluginStorageLifecycle.dbTableName(pluginId, tableName);
-
-    String query = 'SELECT COUNT(*) as count FROM $fullName';
-    List<Object?>? args;
-
-    if (where != null && where.isNotEmpty) {
-      final result = _buildWhereClause(tableDef, where);
-      query += ' WHERE ${result.$1}';
-      args = result.$2;
-    }
-
-    final result = await _db.rawQuery(query, args);
-    return (result.first['count'] as int?) ?? 0;
-  }
-
-  Future<void> clear(String pluginId, String tableName) async {
-    if (!_isValidTable(pluginId, tableName)) {
-      throw ArgumentError('Invalid table "$tableName" for plugin $pluginId');
-    }
-
-    final fullName = PluginStorageLifecycle.dbTableName(pluginId, tableName);
-    await _db.delete(fullName);
+    return null;
   }
 
   // ─── 统计方法 ──────────────────────────────────────────
@@ -369,30 +201,7 @@ class PluginStorageCRUD {
 
   // ─── 内部辅助 ──────────────────────────────────────────
 
-  Map<String, dynamic> _sanitizeRow(
-      StorageTableDefinition tableDef, Map<String, dynamic> row) {
-    final result = <String, dynamic>{};
-    for (final entry in row.entries) {
-      if (entry.key == '_id') continue;
 
-      final colDef = _getColumnDef(tableDef, entry.key);
-      if (colDef == null) continue;
-
-      result[entry.key] = _convertValueToDb(colDef, entry.value);
-    }
-    return result;
-  }
-
-  dynamic _convertValueToDb(StorageColumnDefinition colDef, dynamic value) {
-    if (value == null) return null;
-    if (colDef.type == 'boolean') {
-      if (value is bool) return value ? 1 : 0;
-      if (value is int) return value;
-      if (value is String) return value.toLowerCase() == 'true' ? 1 : 0;
-      return 0;
-    }
-    return value;
-  }
 
   Map<String, dynamic> _convertRowFromDb(
       StorageTableDefinition tableDef, Map<String, dynamic> row) {
@@ -414,58 +223,5 @@ class PluginStorageCRUD {
     return result;
   }
 
-  (String, List<Object?>) _buildWhereClause(
-      StorageTableDefinition tableDef, Map<String, dynamic> where) {
-    final clauses = <String>[];
-    final args = <Object?>[];
 
-    for (final entry in where.entries) {
-      if (!_isValidColumn(tableDef, entry.key)) {
-        throw ArgumentError('Invalid column "${entry.key}" in where clause');
-      }
-
-      if (entry.key == '_id') {
-        clauses.add('_id = ?');
-        args.add(entry.value);
-      } else {
-        final colDef = _getColumnDef(tableDef, entry.key);
-        clauses.add('${entry.key} = ?');
-        if (colDef != null) {
-          args.add(_convertValueToDb(colDef, entry.value));
-        } else {
-          args.add(entry.value);
-        }
-      }
-    }
-
-    return (clauses.join(' AND '), args);
-  }
-
-  String? _sanitizeOrderBy(StorageTableDefinition tableDef, String orderBy) {
-    final parts = orderBy.split(',');
-    final sanitized = <String>[];
-
-    for (final part in parts) {
-      final trimmed = part.trim();
-      if (trimmed.isEmpty) continue;
-
-      final tokens = trimmed.split(RegExp(r'\s+'));
-      final colName = tokens[0];
-      final direction =
-          tokens.length > 1 ? tokens[1].toUpperCase() : 'ASC';
-
-      if (!_isValidColumn(tableDef, colName)) {
-        debugPrint('Invalid column in orderBy: $colName, skipping');
-        continue;
-      }
-      if (direction != 'ASC' && direction != 'DESC') {
-        debugPrint('Invalid direction in orderBy: $direction, using ASC');
-        sanitized.add('$colName ASC');
-      } else {
-        sanitized.add('$colName $direction');
-      }
-    }
-
-    return sanitized.isEmpty ? null : sanitized.join(', ');
-  }
 }

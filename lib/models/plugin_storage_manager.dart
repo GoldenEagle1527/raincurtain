@@ -48,7 +48,8 @@ class PluginStorageManager {
   // ─── 表管理 ──────────────────────────────────────────
 
   /// 确保插件的所有存储表存在（幂等，可在每次插件加载时调用）
-  Future<void> ensureTablesForPlugin(
+  /// 返回一个 bool，指示是否发生了任何表结构变更
+  Future<bool> ensureTablesForPlugin(
       String pluginId, List<StorageTableDefinition> tables) {
     return lifecycle.ensureTablesForPlugin(pluginId, tables);
   }
@@ -63,64 +64,17 @@ class PluginStorageManager {
     _schemaCache[pluginId] = tables;
   }
 
-  // ─── CRUD 操作 ──────────────────────────────────────────
 
-  /// 插入一行或多行数据
-  Future<int> insert(
-      String pluginId, String tableName, List<Map<String, dynamic>> rows) {
-    return crud.insert(pluginId, tableName, rows);
-  }
 
-  /// 查询数据
-  Future<List<Map<String, dynamic>>> query(
+  // ─── 原生 SQL 执行 ──────────────────────────────────────
+
+  /// 执行原生 SQL 语句
+  Future<dynamic> executeSql(
     String pluginId,
-    String tableName, {
-    Map<String, dynamic>? where,
-    String? orderBy,
-    int? limit,
-    int? offset,
-  }) {
-    return crud.query(
-      pluginId,
-      tableName,
-      where: where,
-      orderBy: orderBy,
-      limit: limit,
-      offset: offset,
-    );
-  }
-
-  /// 更新数据
-  Future<int> update(
-    String pluginId,
-    String tableName,
-    Map<String, dynamic> values,
-    Map<String, dynamic>? where,
+    String sql,
+    List<Object?> params,
   ) {
-    return crud.update(pluginId, tableName, values, where);
-  }
-
-  /// 删除数据
-  Future<int> delete(
-    String pluginId,
-    String tableName,
-    Map<String, dynamic>? where,
-  ) {
-    return crud.delete(pluginId, tableName, where);
-  }
-
-  /// 计数
-  Future<int> count(
-    String pluginId,
-    String tableName,
-    Map<String, dynamic>? where,
-  ) {
-    return crud.count(pluginId, tableName, where);
-  }
-
-  /// 清空表
-  Future<void> clear(String pluginId, String tableName) {
-    return crud.clear(pluginId, tableName);
+    return crud.executeSql(pluginId, sql, params);
   }
 
   // ─── 统计方法 ──────────────────────────────────────────

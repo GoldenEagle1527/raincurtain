@@ -2,36 +2,16 @@
 
 插件的存储表结构需在 `manifest.yml` 的 `storage` 字段中声明。
 
-插件通过 `RainCurtain.storage` 对 manifest 中声明的表执行 CRUD 操作。每个表自动包含 `_id` 自增主键。
+插件通过 `RainCurtain.storage.sql()` 对 manifest 中声明的表执行 SQL 操作（包括查询与更新）。每个表自动包含 `_id` 自增主键。
 
 ```javascript
-// 插入（单行或多行）
-await RainCurtain.storage.insert(table, rows)
-// rows: { col: val } 或 [{ col: val }, ...]
-// 返回: { insertedCount: N }
-
-// 查询
-await RainCurtain.storage.query(table, options)
-// options: { where: { col: val }, orderBy: 'col DESC', limit: 10, offset: 0 }
-// 返回: [{ _id: 1, col: val, ... }, ...]
-
-// 更新
-await RainCurtain.storage.update(table, values, where)
-// values: { col: newVal }
-// where: { _id: 1 }  可选，为空则更新全部
-// 返回: { updatedCount: N }
-
-// 删除
-await RainCurtain.storage.delete(table, where)
-// where: { _id: 1 }  可选，为空则删除全部
-// 返回: { deletedCount: N }
-
-// 计数
-await RainCurtain.storage.count(table, where)
-// 返回: N
-
-// 清空表
-await RainCurtain.storage.clear(table)
+// 原生 SQL 查询与更新
+await RainCurtain.storage.sql(sqlString, params)
+// sqlString: SQL 语句，表名使用 manifest 中声明的逻辑名（系统自动改写为物理隔离表名）
+// params: 参数化绑定数组，对应 SQL 中的 ? 占位符
+// SELECT 返回: [{ col: val, ... }, ...]  
+// DML (INSERT/UPDATE/DELETE) 返回: { changes: N }
+// 错误返回: { error: '错误信息' }
 ```
 
 ## manifest.yml 中的表声明
@@ -59,102 +39,67 @@ storage:
 
 ## 使用示例
 
+### 1. 插入数据
 ```javascript
-// 插入一条记录
-const result = await RainCurtain.storage.insert('records', {
-  item: '午饭',
-  amount: 18.5,
-  created_at: new Date().toISOString()
-});
-// result: { insertedCount: 1 }
+// 插入单条记录
+const result = await RainCurtain.storage.sql(
+  'INSERT INTO records (item, amount, created_at) VALUES (?, ?, ?)',
+  ['午饭', 18.5, new Date().toISOString()]
+);
+// result: { changes: 1 }
+```
 
-// 批量插入
-await RainCurtain.storage.insert('records', [
-  { item: '午饭', amount: 18 },
-  { item: '晚饭', amount: 25 }
-]);
+### 2. 查询数据
+```javascript
+// 带条件和排序的查询
+const rows = await RainCurtain.storage.sql(
+  'SELECT * FROM records WHERE amount > ? ORDER BY created_at DESC LIMIT 20',
+  [10]
+);
+// rows: [{ _id: 1, item: '午饭', amount: 18.5, created_at: '...' }]
+```
 
-// 查询（带条件和排序）
-const rows = await RainCurtain.storage.query('records', {
-  where: { type: 'expense' },
-  orderBy: 'created_at DESC',
-  limit: 20
-});
+### 3. 更新数据
+```javascript
+// 更新记录
+const result = await RainCurtain.storage.sql(
+  'UPDATE records SET amount = ? WHERE _id = ?',
+  [20.0, 1]
+);
+// result: { changes: 1 }
+```
 
-// 按 _id 更新
-await RainCurtain.storage.update('records', { amount: 20 }, { _id: 1 });
+### 4. 删除数据
+```javascript
+// 删除记录
+const result = await RainCurtain.storage.sql(
+  'DELETE FROM records WHERE _id = ?',
+  [1]
+);
+// result: { changes: 1 }
+```
 
-// 按条件删除
-await RainCurtain.storage.delete('records', { _id: 1 });
-
-// 计数
-const total = await RainCurtain.storage.count('records');
-const expenses = await RainCurtain.storage.count('records', { type: 'expense' });
+### 5. 计数与清空表
+```javascript
+// 获取总数
+const stats = await RainCurtain.storage.sql(
+  'SELECT COUNT(*) as count FROM records',
+  []
+);
+const total = stats[0].count;
 
 // 清空表
-await RainCurtain.storage.clear('records');
-```
-
-## 初始化模式
-
-```javascript
-async function init() {
-  // 查询已有数据
-  const records = await RainCurtain.storage.query('records', {
-    orderBy: 'created_at DESC',
-    limit: 50
-  });
-  
-  if (records.length > 0) {
-    renderRecords(records);
-  }
-  
-  // 统计
-  const count = await RainCurtain.storage.count('records');
-  updateStats(count);
-}
-```
-
-## 查询限制
-
-**`where` 参数仅支持等值匹配**（如 `{ type: 'expense' }`），不支持范围比较（`>`、`<`、`>=`、`<=`）、模糊匹配（`LIKE`）或逻辑组合（`OR`）。
-
-需要范围或模糊查询时，应全量查询后在 JS 内存中筛选：
-
-```javascript
-// 错误：where 不支持范围查询
-// await RainCurtain.storage.query('records', { where: { amount: { gt: 100 } } });
-
-// 正确：全量查询后内存筛选
-const all = await RainCurtain.storage.query('records', {
-  orderBy: 'created_at DESC'
-});
-const filtered = all.filter(r => r.amount > 100);
-```
-
-## Upsert 模式
-
-Storage API 不提供原生 upsert 操作，需手动实现"存在则更新，不存在则插入"：
-
-```javascript
-async function upsert(table, where, values) {
-  const rows = await RainCurtain.storage.query(table, { where, limit: 1 });
-  if (rows.length > 0) {
-    await RainCurtain.storage.update(table, values, where);
-  } else {
-    await RainCurtain.storage.insert(table, { ...where, ...values });
-  }
-}
-
-// 使用示例：保存设置项
-await upsert('settings', { key: 'theme' }, { key: 'theme', value: 'dark' });
+await RainCurtain.storage.sql(
+  'DELETE FROM records',
+  []
+);
 ```
 
 ## 存储特点
 
 - 每个插件独立的结构化表，按列存储
 - 支持 text / integer / real / boolean 四种列类型
-- boolean 列在 JS 层自动转换（true/false ↔ 0/1）
+- boolean 列在 JS 层与 SQLite 存储层（0/1）之间自动转换（true/false ↔ 0/1）
 - 每个表自动包含 `_id` 自增主键
 - 表结构由 manifest.yml 声明，安装时自动建表
 - 卸载插件时自动清理所有表
@@ -170,6 +115,22 @@ await upsert('settings', { key: 'theme' }, { key: 'theme', value: 'dark' });
 | **修改列类型** | 删除并重建整个表 | **数据丢失** |
 
 简单来说：只要不改变已有列的类型，用户数据就不会丢失。如果需要变更列类型，应当通知用户数据会被清除。
+
+## SQL 执行注意事项
+
+### 表名自动改写
+SQL 中直接使用 manifest 中声明的**逻辑表名**（如 `records`），系统会自动将其改写为插件隔离的物理表名。无需关心实际的表名前缀。
+
+### 参数化绑定
+**必须使用参数化绑定**（`?` 占位符 + params 数组），防止 SQL 注入。
+
+### 错误处理
+```javascript
+const result = await RainCurtain.storage.sql('INVALID SQL', []);
+if (result && result.error) {
+  console.error('SQL 执行失败:', result.error);
+}
+```
 
 ## 专属文件存储 (personalStorage)
 
@@ -191,7 +152,7 @@ const result = await RainCurtain.personalStorage.writeText("configs/user_config.
 
 #### 2. 写入二进制文件 (`writeBinary`)
 ```javascript
-// 写入 Base64 编码的二进制数据（常用于图片、音频等流式或大文件缓存）
+// 写入 Base64 编码 of 二进制数据（常用于图片、音频等流式或大文件缓存）
 const base64Data = "iVBORw0KGgoAAAANSUhEUgAA..."; // Base64 编码的 PNG
 const result = await RainCurtain.personalStorage.writeBinary("assets/logo.png", base64Data);
 // 返回: { success: true } 或 { success: false, error: "错误信息" }

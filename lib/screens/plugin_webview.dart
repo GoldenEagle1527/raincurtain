@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
+import 'package:provider/provider.dart';
 import '../models/plugin_manager.dart';
 import '../models/console_manager.dart';
 import '../models/plugin_storage_manager.dart';
@@ -65,6 +66,7 @@ class PluginWebViewState extends State<PluginWebView>
   String? errorMessage;
   ThemeData? _currentTheme;
   bool _isDbReady = false;
+  late LocalPlugin _currentPlugin;
 
   /// 控制台日志管理器，用于捕获 WebView 的 console 输出
   final ConsoleManager consoleManager = ConsoleManager();
@@ -93,6 +95,7 @@ class PluginWebViewState extends State<PluginWebView>
   @override
   void initState() {
     super.initState();
+    _currentPlugin = widget.plugin;
     initNotifications();
     HardwareKeyboard.instance.addHandler(_handleKeyEvent);
     initWsManager(() => webViewController, () => mounted);
@@ -102,15 +105,36 @@ class PluginWebViewState extends State<PluginWebView>
   }
 
   Future<void> _ensurePluginStorageSchema() async {
-    final manifest = widget.plugin.manifest;
+    try {
+      final pluginManager = context.read<PluginManager>();
+      final updatedPlugin = await pluginManager.reloadPlugin(widget.plugin.id);
+      if (updatedPlugin != null && mounted) {
+        setState(() {
+          _currentPlugin = updatedPlugin;
+        });
+      }
+    } catch (e) {
+      debugPrint('Failed to reload plugin before ensuring storage schema: $e');
+    }
+
+    final plugin = _currentPlugin;
+    final manifest = plugin.manifest;
     if (manifest.storage.isNotEmpty) {
       try {
-        await PluginStorageManager.instance.ensureTablesForPlugin(
+        final didChange = await PluginStorageManager.instance.ensureTablesForPlugin(
           manifest.id,
           manifest.storage,
         );
+        if (didChange && mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('已自动更新插件“${plugin.name}”的数据库表结构'),
+              duration: const Duration(seconds: 2),
+            ),
+          );
+        }
       } catch (e) {
-        debugPrint('Failed to ensure database tables for plugin ${widget.plugin.id}: $e');
+        debugPrint('Failed to ensure database tables for plugin ${plugin.id}: $e');
       }
     }
     if (mounted) {
@@ -175,7 +199,8 @@ class PluginWebViewState extends State<PluginWebView>
   Widget build(BuildContext context) {
     super.build(context); // AutomaticKeepAliveClientMixin 要求
     
-    final manifest = widget.plugin.manifest;
+    final plugin = _currentPlugin;
+    final manifest = plugin.manifest;
     final needsDb = manifest.storage.isNotEmpty;
     final isReady = !needsDb || _isDbReady;
     
@@ -190,7 +215,7 @@ class PluginWebViewState extends State<PluginWebView>
     }
 
     // 使用系统自动分配的沙盒服务器端口
-    final url = 'http://localhost:$sandboxServerPort/${widget.plugin.id}/';
+    final url = 'http://localhost:$sandboxServerPort/${plugin.id}/';
 
     Widget mainView = Stack(
       children: [
@@ -225,7 +250,7 @@ class PluginWebViewState extends State<PluginWebView>
             ),
             // 注入 API 脚本
             UserScript(
-              source: generateRainCurtainAPI(widget.plugin.id),
+              source: generateRainCurtainAPI(plugin.id),
               injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
             ),
             // 注入网络请求拦截脚本，跨域请求改由 Flutter 侧发起
@@ -335,7 +360,7 @@ class PluginWebViewState extends State<PluginWebView>
             registerApiHandlers(
               controller,
               context: context,
-              plugin: widget.plugin,
+              plugin: plugin,
               poolId: widget.poolId,
               poolPluginId: widget.poolPluginId,
             );

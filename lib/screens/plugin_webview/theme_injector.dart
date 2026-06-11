@@ -251,6 +251,99 @@ String generateThemeJS(ThemeData theme) {
       scrollbar-width: thin;
       scrollbar-color: var(--md-scrollbar-thumb-bg) var(--md-scrollbar-track-bg);
     }
+    
+    /* 自定义下拉弹出框（MD3 规范） */
+    .raincurtain-dropdown-menu {
+      position: absolute;
+      z-index: 100000;
+      background-color: var(--md-surface-container-high);
+      border: 1px solid var(--md-outline-variant);
+      border-radius: 8px;
+      box-shadow: 0px 4px 8px 3px rgba(0, 0, 0, 0.15), 0px 1px 3px 0px rgba(0, 0, 0, 0.3);
+      overflow-y: auto;
+      overflow-x: hidden;
+      max-height: 280px;
+      box-sizing: border-box;
+      padding: 4px 0;
+      margin: 0;
+      list-style: none;
+      
+      /* 动画属性 */
+      opacity: 0;
+      transform: scale(0.95) translateY(-8px);
+      transition: opacity 0.15s cubic-bezier(0, 0, 0.2, 1), transform 0.15s cubic-bezier(0, 0, 0.2, 1);
+      pointer-events: none;
+      display: none;
+    }
+    
+    .raincurtain-dropdown-menu.show {
+      display: block;
+    }
+    
+    .raincurtain-dropdown-menu.visible {
+      opacity: 1;
+      transform: scale(1) translateY(0);
+      pointer-events: auto;
+    }
+    
+    .raincurtain-dropdown-item {
+      font-family: var(--md-font);
+      font-size: 14px;
+      line-height: 20px;
+      padding: 10px 16px;
+      margin: 2px 6px;
+      border-radius: 6px;
+      color: var(--md-on-surface);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      user-select: none;
+      transition: background-color 0.15s ease, color 0.15s ease;
+    }
+    
+    .raincurtain-dropdown-item:hover {
+      background-color: color-mix(in srgb, var(--md-on-surface) 8%, transparent);
+    }
+    
+    .raincurtain-dropdown-item.selected {
+      background-color: var(--md-primary-container);
+      color: var(--md-on-primary-container);
+      font-weight: 500;
+    }
+    
+    .raincurtain-dropdown-item.selected:hover {
+      background-color: color-mix(in srgb, var(--md-on-primary-container) 8%, var(--md-primary-container));
+    }
+    
+    .raincurtain-dropdown-item.disabled {
+      opacity: 0.38;
+      pointer-events: none;
+      cursor: not-allowed;
+    }
+    
+    .raincurtain-dropdown-item-check {
+      width: 16px;
+      height: 16px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 12px;
+      font-weight: bold;
+      opacity: 0;
+      transition: opacity 0.1s ease;
+      color: var(--md-primary);
+    }
+    
+    .raincurtain-dropdown-item.selected .raincurtain-dropdown-item-check {
+      opacity: 1;
+      color: var(--md-on-primary-container);
+    }
+    
+    /* 原生 select 处于弹出状态时的辅助样式类 */
+    select.raincurtain-select-open {
+      outline: none;
+    }
   `;
 
   function _applyTheme() {
@@ -282,6 +375,170 @@ String generateThemeJS(ThemeData theme) {
       }
     });
     _obs.observe(document, { childList: true, subtree: true });
+  }
+
+  // ===== 拦截原生 select 弹出列表并显示自定义 MD3 下拉浮层 =====
+  function _setupSelectInterceptor() {
+    var activeMenu = null;
+    var activeSelect = null;
+    var transitionTimeout = null;
+
+    function getOrCreateMenu() {
+      var menu = document.getElementById('raincurtain-global-dropdown');
+      if (!menu) {
+        menu = document.createElement('ul');
+        menu.id = 'raincurtain-global-dropdown';
+        menu.className = 'raincurtain-dropdown-menu';
+        document.body.appendChild(menu);
+      }
+      return menu;
+    }
+
+    function closeMenu() {
+      if (activeMenu) {
+        var menu = activeMenu;
+        var select = activeSelect;
+        
+        menu.classList.remove('visible');
+        if (select) {
+          select.classList.remove('raincurtain-select-open');
+        }
+        
+        if (transitionTimeout) clearTimeout(transitionTimeout);
+        
+        transitionTimeout = setTimeout(function() {
+          menu.classList.remove('show');
+        }, 150);
+        
+        activeMenu = null;
+        activeSelect = null;
+      }
+    }
+
+    function handleSelectClick(e) {
+      var select = e.target;
+      if (!select || select.tagName !== 'SELECT') return;
+
+      if (select.disabled) {
+        e.preventDefault();
+        return;
+      }
+
+      e.preventDefault();
+
+      if (activeSelect === select) {
+        closeMenu();
+        return;
+      }
+
+      closeMenu();
+
+      activeSelect = select;
+      select.classList.add('raincurtain-select-open');
+
+      var menu = getOrCreateMenu();
+      menu.innerHTML = '';
+
+      var options = select.options;
+      for (var i = 0; i < options.length; i++) {
+        var opt = options[i];
+        var li = document.createElement('li');
+        li.className = 'raincurtain-dropdown-item';
+        if (opt.disabled) li.classList.add('disabled');
+        if (opt.selected) li.classList.add('selected');
+
+        var textSpan = document.createElement('span');
+        textSpan.textContent = opt.text;
+        li.appendChild(textSpan);
+
+        var checkSpan = document.createElement('span');
+        checkSpan.className = 'raincurtain-dropdown-item-check';
+        checkSpan.textContent = '✓';
+        li.appendChild(checkSpan);
+
+        (function(index) {
+          li.addEventListener('click', function(itemEvent) {
+            itemEvent.stopPropagation();
+            if (select.selectedIndex !== index) {
+              select.selectedIndex = index;
+              select.dispatchEvent(new Event('input', { bubbles: true }));
+              select.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+            closeMenu();
+          });
+        })(i);
+
+        menu.appendChild(li);
+      }
+
+      var rect = select.getBoundingClientRect();
+      var scrollTop = window.pageYOffset || document.documentElement.scrollTop;
+      var scrollLeft = window.pageXOffset || document.documentElement.scrollLeft;
+
+      var top = rect.bottom + scrollTop;
+      var left = rect.left + scrollLeft;
+      var width = rect.width;
+
+      if (width < 120) {
+        width = 120;
+      }
+
+      if (transitionTimeout) clearTimeout(transitionTimeout);
+      menu.style.display = 'block';
+      menu.classList.add('show');
+      menu.classList.remove('visible');
+      menu.style.left = '0px';
+      menu.style.top = '0px';
+      menu.style.width = width + 'px';
+
+      var menuHeight = menu.offsetHeight;
+      var windowHeight = window.innerHeight;
+
+      if (rect.bottom + menuHeight > windowHeight && rect.top > menuHeight) {
+        top = rect.top + scrollTop - menuHeight - 4;
+        menu.style.transformOrigin = 'bottom left';
+      } else {
+        top = rect.bottom + scrollTop + 4;
+        menu.style.transformOrigin = 'top left';
+      }
+
+      var windowWidth = window.innerWidth;
+      if (rect.left + width > windowWidth) {
+        left = windowWidth - width - 8;
+      }
+      if (left < 8) left = 8;
+
+      menu.style.left = left + 'px';
+      menu.style.top = top + 'px';
+
+      requestAnimationFrame(function() {
+        menu.classList.add('visible');
+        activeMenu = menu;
+      });
+    }
+
+    document.addEventListener('mousedown', handleSelectClick, true);
+    document.addEventListener('touchstart', handleSelectClick, true);
+
+    document.addEventListener('click', function(e) {
+      if (activeMenu && !activeMenu.contains(e.target) && e.target !== activeSelect) {
+        closeMenu();
+      }
+    }, true);
+
+    window.addEventListener('scroll', function(e) {
+      var menu = document.getElementById('raincurtain-global-dropdown');
+      if (menu && menu.contains(e.target)) {
+        return;
+      }
+      closeMenu();
+    }, true);
+    window.addEventListener('resize', closeMenu);
+  }
+
+  if (!window.__raincurtainSelectIntercepted) {
+    window.__raincurtainSelectIntercepted = true;
+    _setupSelectInterceptor();
   }
 })();
 ''';

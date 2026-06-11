@@ -9,9 +9,11 @@ class PluginStorageLifecycle {
   PluginStorageLifecycle(this._db, this._schemaCache);
 
   /// 确保插件的所有存储表存在（幂等，可在每次插件加载时调用）
-  Future<void> ensureTablesForPlugin(
+  /// 返回一个 bool，指示是否发生了任何表结构变更
+  Future<bool> ensureTablesForPlugin(
       String pluginId, List<StorageTableDefinition> tables) async {
     _schemaCache[pluginId] = tables;
+    bool hasChanged = false;
 
     for (final table in tables) {
       final fullName = dbTableName(pluginId, table.name);
@@ -62,6 +64,7 @@ class PluginStorageLifecycle {
               'Incompatible schema change for $fullName, '
               'dropping and recreating (type conflict)');
           await _db.execute('DROP TABLE IF EXISTS $fullName');
+          hasChanged = true;
         } else {
           // 无类型冲突，尝试增量迁移：ADD COLUMN 补齐新列
           final columnsToAdd = expectedColumns.keys
@@ -73,20 +76,29 @@ class PluginStorageLifecycle {
             await _db.execute(
                 'ALTER TABLE $fullName ADD COLUMN $colName $colType');
             debugPrint('Added column $colName ($colType) to $fullName');
+            hasChanged = true;
           }
 
-          // 旧表中多出的列（已删除的列）不做处理，保留在表中
+          // 删除不再期望的冗余列
           final droppedColumns = existingColumns.keys
               .where((name) => !expectedColumns.containsKey(name))
-              .toSet();
-          if (droppedColumns.isNotEmpty) {
-            debugPrint(
-                'Columns no longer in schema for $fullName: '
-                '$droppedColumns (kept in table, ignored by CRUD)');
+              .toList();
+          for (final colName in droppedColumns) {
+            try {
+              await _db.execute('ALTER TABLE $fullName DROP COLUMN $colName');
+              debugPrint('Dropped column $colName from $fullName');
+              hasChanged = true;
+            } catch (e) {
+              debugPrint(
+                  'Failed to drop column $colName from $fullName '
+                  '(SQLite version may not support DROP COLUMN): $e');
+            }
           }
 
           continue; // 增量迁移完成，不需要重建
         }
+      } else {
+        hasChanged = true;
       }
 
       // 创建表（首次或 DROP 后重建）
@@ -101,11 +113,16 @@ class PluginStorageLifecycle {
       ''');
       debugPrint('Created storage table: $fullName');
     }
+
+    return hasChanged;
   }
 
   /// 检查现有表结构是否已满足期望 schema
   bool _columnsMatch(
       Map<String, String> existing, Map<String, String> expected) {
+    if (existing.length != expected.length) {
+      return false;
+    }
     for (final entry in expected.entries) {
       final existingType = existing[entry.key];
       if (existingType == null || existingType != entry.value) {

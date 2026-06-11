@@ -25,7 +25,7 @@ try {
 }
 
 // ★★★ 在这里修改版本号 ★★★
-const VERSION = "1.3.5";
+const VERSION = "1.3.6";
 const BUILD = currentBuild + 1; // 自动在当前版本基础上自增
 
 // ========================================

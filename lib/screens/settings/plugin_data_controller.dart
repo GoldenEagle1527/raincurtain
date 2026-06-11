@@ -70,7 +70,14 @@ class PluginDataController extends ChangeNotifier {
       
       tableRowCounts.clear();
       for (final table in tables) {
-        final count = await storageManager.count(pluginId, table, null);
+        final res = await storageManager.executeSql(
+          pluginId,
+          'SELECT COUNT(*) as count FROM $table',
+          [],
+        );
+        final count = (res is List && res.isNotEmpty)
+            ? (res.first['count'] as int? ?? 0)
+            : 0;
         tableRowCounts[table] = count;
       }
 
@@ -126,22 +133,52 @@ class PluginDataController extends ChangeNotifier {
 
     try {
       // 查出该过滤条件下的总行数
-      final total = await storageManager.count(
-        pluginId,
-        tableName,
-        activeWhereClause,
-      );
+      int total = 0;
+      if (activeWhereClause != null && activeWhereClause!.isNotEmpty) {
+        final clauses = <String>[];
+        final params = <Object?>[];
+        for (final entry in activeWhereClause!.entries) {
+          clauses.add('${entry.key} = ?');
+          params.add(entry.value);
+        }
+        final res = await storageManager.executeSql(
+          pluginId,
+          'SELECT COUNT(*) as count FROM $tableName WHERE ${clauses.join(' AND ')}',
+          params,
+        );
+        total = (res is List && res.isNotEmpty)
+            ? (res.first['count'] as int? ?? 0)
+            : 0;
+      } else {
+        final res = await storageManager.executeSql(
+          pluginId,
+          'SELECT COUNT(*) as count FROM $tableName',
+          [],
+        );
+        total = (res is List && res.isNotEmpty)
+            ? (res.first['count'] as int? ?? 0)
+            : 0;
+      }
 
       // 查询分页数据
       final offset = (currentPage - 1) * pageSize;
-      final rows = await storageManager.query(
-        pluginId,
-        tableName,
-        where: activeWhereClause,
-        limit: pageSize,
-        offset: offset,
-        orderBy: '_id DESC',
-      );
+      String sql = 'SELECT * FROM $tableName';
+      final params = <Object?>[];
+      if (activeWhereClause != null && activeWhereClause!.isNotEmpty) {
+        final clauses = <String>[];
+        for (final entry in activeWhereClause!.entries) {
+          clauses.add('${entry.key} = ?');
+          params.add(entry.value);
+        }
+        sql += ' WHERE ${clauses.join(' AND ')}';
+      }
+      sql += ' ORDER BY _id DESC';
+      sql += ' LIMIT $pageSize OFFSET $offset';
+
+      final res = await storageManager.executeSql(pluginId, sql, params);
+      final List<Map<String, dynamic>> rows = (res is List)
+          ? res.map((e) => Map<String, dynamic>.from(e as Map)).toList()
+          : [];
 
       // 提取列名
       final colSet = <String>{'_id'};
@@ -296,10 +333,10 @@ class PluginDataController extends ChangeNotifier {
     final rowId = row['_id'];
     if (rowId == null) return;
 
-    await storageManager.delete(
+    await storageManager.executeSql(
       pluginId,
-      tableName,
-      {'_id': rowId},
+      'DELETE FROM $tableName WHERE _id = ?',
+      [rowId],
     );
     await loadTables(); // 同时刷新左侧统计
     await loadPageData();
@@ -310,7 +347,11 @@ class PluginDataController extends ChangeNotifier {
     final tableName = selectedTable;
     if (tableName == null) return;
 
-    await storageManager.clear(pluginId, tableName);
+    await storageManager.executeSql(
+      pluginId,
+      'DELETE FROM $tableName',
+      [],
+    );
     currentPage = 1;
     await loadTables();
     await loadPageData();
@@ -321,12 +362,22 @@ class PluginDataController extends ChangeNotifier {
     final tableName = selectedTable;
     if (tableName == null || columns.isEmpty) return null;
 
-    final allRows = await storageManager.query(
-      pluginId,
-      tableName,
-      where: activeWhereClause,
-      orderBy: '_id DESC',
-    );
+    String sql = 'SELECT * FROM $tableName';
+    final params = <Object?>[];
+    if (activeWhereClause != null && activeWhereClause!.isNotEmpty) {
+      final clauses = <String>[];
+      for (final entry in activeWhereClause!.entries) {
+        clauses.add('${entry.key} = ?');
+        params.add(entry.value);
+      }
+      sql += ' WHERE ${clauses.join(' AND ')}';
+    }
+    sql += ' ORDER BY _id DESC';
+
+    final res = await storageManager.executeSql(pluginId, sql, params);
+    final List<Map<String, dynamic>> allRows = (res is List)
+        ? res.map((e) => Map<String, dynamic>.from(e as Map)).toList()
+        : [];
 
     if (allRows.isEmpty) return null;
 
