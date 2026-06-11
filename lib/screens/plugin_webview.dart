@@ -22,6 +22,7 @@ import 'plugin_webview/udp_handler.dart';
 import 'plugin_webview/dns_handler.dart';
 import 'plugin_webview/orientation_handler.dart';
 import 'plugin_webview/console_handler.dart';
+import 'plugin_webview/dialog_interceptor.dart';
 import '../utils/permission_utils.dart';
 import '../utils/responsive_helper.dart';
 
@@ -56,7 +57,8 @@ class PluginWebViewState extends State<PluginWebView>
          UdpMixin,
          DnsMixin,
          OrientationMixin,
-         ConsoleMixin {
+         ConsoleMixin,
+         DialogMixin {
   @override
   bool get wantKeepAlive => true;
 
@@ -233,6 +235,12 @@ class PluginWebViewState extends State<PluginWebView>
               source: theme.generateThemeJS(Theme.of(context)),
               injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
             ),
+            // 注入 MD3 弹窗组件（alert / confirm / prompt）
+            UserScript(
+              source: DialogMixin.polyfillJS,
+              injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
+              forMainFrameOnly: false,
+            ),
             // Windows 平台不注入通知 polyfill，使用原生 Web Notification API
             if (!Platform.isWindows)
               UserScript(
@@ -351,6 +359,9 @@ class PluginWebViewState extends State<PluginWebView>
               retain: granted,
             );
           },
+          onJsAlert: handleJsAlert,
+          onJsConfirm: handleJsConfirm,
+          onJsPrompt: handleJsPrompt,
           onWebViewCreated: (controller) {
             webViewController = controller;
 

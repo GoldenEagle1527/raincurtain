@@ -47,7 +47,7 @@ flutter:
         - asset: assets/fonts/NotoSerifSC-VariableFont_wght.ttf
     
     # Material Icons 字体
-    - family: MaterialIcons
+    - family: MaterialIconsFilled
       fonts:
         - asset: assets/fonts/material-icons/MaterialIcons-Regular.ttf
     

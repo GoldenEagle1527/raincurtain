@@ -1,0 +1,45 @@
+---
+description: Codegraph MCP 调用规范——参数名 task/query/symbol 不可混用，调用前必读
+alwaysApply: true
+---
+
+# Codegraph MCP 调用规范
+
+**硬性规则：调用 `user-codegraph` 任何工具前，先确认该工具的必填参数名。混用必报错。**
+
+## 最常见错误（你看到的 `task must be a non-empty string`）
+
+调用了 `codegraph_context`，却传了 `query`：
+
+```json
+// ❌ 错误 — 会报 task must be a non-empty string
+{ "query": "purge_stale_broker_prefetch unacked messages status None" }
+
+// ✅ 正确 — 参数名是 task
+{ "task": "purge_stale_broker_prefetch how it handles unacked messages when status is None" }
+```
+
+## 参数名对照（10 个工具）
+
+| 工具 | 必填参数 |
+|------|----------|
+| `codegraph_context` | **`task`**（自然语言问题） |
+| `codegraph_search` | **`query`**（符号名） |
+| `codegraph_explore` | **`query`**（符号/文件名关键词袋，非问句） |
+| `codegraph_node` | **`symbol`** |
+| `codegraph_trace` | **`from`**, **`to`** |
+| `codegraph_callers` / `codegraph_callees` / `codegraph_impact` | **`symbol`** |
+| `codegraph_files` / `codegraph_status` | 无必填 |
+
+## 选工具
+
+- 理解函数/模块行为 → `codegraph_context`（`task`）
+- 已知符号名定位 → `codegraph_search`（`query`）
+- X 怎么调用到 Y → `codegraph_trace`（`from`/`to`）
+- 多个符号源码 → `codegraph_explore`（`query` 写符号名，不写问句）
+
+## 反模式
+
+- 用 `query` 调 `codegraph_context`
+- 用 grep/Read 循环代替 codegraph（除非响应标记文件 stale）
+- 用多次 `codegraph_node` 代替一次 `codegraph_explore`

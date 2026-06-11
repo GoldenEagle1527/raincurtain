@@ -33,7 +33,7 @@ class MaterialIconsRegistry {
 
   /// variant 对应的字体族名（与 pubspec.yaml 中 family 字段一致）
   static const Map<MaterialIconVariant, String> _fontFamilies = {
-    MaterialIconVariant.filled: 'MaterialIcons',
+    MaterialIconVariant.filled: 'MaterialIconsFilled',
     MaterialIconVariant.outlined: 'MaterialIconsOutlined',
     MaterialIconVariant.rounded: 'MaterialIconsRounded',
     MaterialIconVariant.sharp: 'MaterialIconsSharp',

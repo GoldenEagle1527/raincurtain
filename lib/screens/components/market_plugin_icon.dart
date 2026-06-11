@@ -49,12 +49,14 @@ class MarketPluginIconWidget extends StatelessWidget {
       return _buildAbbreviation(colorScheme);
     }
 
+    final fontFamily = registry.fontFamilyFor(iconName, MaterialIconVariant.filled);
+
     return Text(
       String.fromCharCode(codePoint),
       textAlign: TextAlign.center,
       textDirection: TextDirection.ltr,
       style: TextStyle(
-        fontFamily: 'MaterialIcons',
+        fontFamily: fontFamily,
         fontSize: size,
         height: 1.0,
         color: colorScheme.onPrimaryContainer,
