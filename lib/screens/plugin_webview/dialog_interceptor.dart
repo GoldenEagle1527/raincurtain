@@ -1,8 +1,7 @@
-import 'dart:convert';
-
-import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 
+import 'dialog_sync_bridge.dart';
 /// 将 JS bridge 返回值规范为 bool（兼容 bool / 1 / "true"）。
 @visibleForTesting
 bool jsBridgeBoolTrue(dynamic value) {
@@ -362,35 +361,152 @@ mixin DialogMixin {
 })();
 """;
 
-  Future<dynamic> _callDialogJs(
-    InAppWebViewController controller,
-    String functionBody,
-  ) async {
-    final result = await controller.callAsyncJavaScript(
-      functionBody: functionBody,
-    );
-    if (result == null) {
-      throw StateError('callAsyncJavaScript returned null');
+  /// WebView 未可靠触发 onJs* 时，在 JS 层拦截 alert/confirm/prompt。
+  /// 通过同步 XHR + [DialogSyncBridge] 在 Flutter 侧显示对话框并保持同步语义。
+  static String nativeDialogOverrideJS(int port) {
+    return '''
+(function() {
+  if (window.__raincurtainDialogOverridesInstalled) return;
+  window.__raincurtainDialogOverridesInstalled = true;
+
+  var base = 'http://localhost:$port/__raincurtain_dialog/sync/';
+
+  function syncRequest(kind, message, defaultValue) {
+    var url = base + kind + '?message=' + encodeURIComponent(String(message == null ? '' : message));
+    if (kind === 'prompt') {
+      url += '&defaultValue=' + encodeURIComponent(defaultValue == null ? '' : String(defaultValue));
     }
-    if (result.error != null && result.error!.isNotEmpty) {
-      throw Exception(result.error);
+    var XHR = window.__raincurtainNativeXMLHttpRequest || XMLHttpRequest;
+    var xhr = new XHR();
+    xhr.open('GET', url, false);
+    try {
+      xhr.send(null);
+    } catch (e) {
+      console.error('[raincurtain] sync dialog request failed:', e);
+      return kind === 'alert' ? undefined : (kind === 'confirm' ? false : null);
     }
-    return result.value;
+    if (xhr.status !== 200) {
+      return kind === 'alert' ? undefined : (kind === 'confirm' ? false : null);
+    }
+    try {
+      var data = JSON.parse(xhr.responseText || '{}');
+      if (kind === 'alert') return undefined;
+      if (kind === 'confirm') return !!data.value;
+      return data.value == null ? null : String(data.value);
+    } catch (_) {
+      return kind === 'alert' ? undefined : (kind === 'confirm' ? false : null);
+    }
   }
 
-  Future<void> _recoverDialogState(InAppWebViewController controller) async {
-    try {
-      await controller.callAsyncJavaScript(
-        functionBody: '''
-if (window.__rainCurtainDialog && window.__rainCurtainDialog._forceDismiss) {
-  window.__rainCurtainDialog._forceDismiss();
-}
-return true;
-''',
-      );
-    } catch (e) {
-      debugPrint('[DialogMixin] failed to recover dialog state: $e');
-    }
+  window.alert = function(message) {
+    syncRequest('alert', message);
+  };
+
+  window.confirm = function(message) {
+    return syncRequest('confirm', message);
+  };
+
+  window.prompt = function(message, defaultValue) {
+    return syncRequest('prompt', message, defaultValue);
+  };
+})();
+''';
+  }
+
+  void registerDialogBridge(BuildContext context) {
+    DialogSyncBridge.instance.registerHost(
+      showAlert: (message) => _showMaterialAlert(context, message),
+      showConfirm: (message) => _showMaterialConfirm(context, message),
+      showPrompt: (message, defaultValue) =>
+          _showMaterialPrompt(context, message, defaultValue),
+    );
+  }
+
+  void unregisterDialogBridge() {
+    DialogSyncBridge.instance.unregisterHost();
+  }
+
+  Future<void> _showMaterialAlert(BuildContext context, String message) async {
+    if (!context.mounted) return;
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: true,
+      builder: (dialogContext) => AlertDialog(
+        content: Text(message),
+        actions: [
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('确定'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<bool> _showMaterialConfirm(BuildContext context, String message) async {
+    if (!context.mounted) return false;
+    final result = await showDialog<bool>(
+      context: context,
+      barrierDismissible: true,
+      builder: (dialogContext) => AlertDialog(
+        content: Text(message),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('确定'),
+          ),
+        ],
+      ),
+    );
+    return result ?? false;
+  }
+
+  Future<String?> _showMaterialPrompt(
+    BuildContext context,
+    String message,
+    String defaultValue,
+  ) async {
+    if (!context.mounted) return null;
+    final controller = TextEditingController(text: defaultValue);
+    final result = await showDialog<String?>(
+      context: context,
+      barrierDismissible: true,
+      builder: (dialogContext) => AlertDialog(
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(message),
+            const SizedBox(height: 16),
+            TextField(
+              controller: controller,
+              autofocus: true,
+              decoration: const InputDecoration(
+                isDense: true,
+                border: OutlineInputBorder(),
+              ),
+              onSubmitted: (value) => Navigator.pop(dialogContext, value),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, null),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, controller.text),
+            child: const Text('确定'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    return result;
   }
 
   Future<JsAlertResponse?> handleJsAlert(
@@ -398,20 +514,16 @@ return true;
     JsAlertRequest request,
   ) async {
     try {
-      await _callDialogJs(
-        controller,
-        '''
-await window.__rainCurtainDialog.showAlert(${jsonEncode(request.message ?? '')});
-return true;
-''',
-      );
+      final showAlert = DialogSyncBridge.instance.showAlert;
+      if (showAlert != null) {
+        await showAlert(request.message ?? '');
+      }
       return JsAlertResponse(
         handledByClient: true,
         action: JsAlertResponseAction.CONFIRM,
       );
     } catch (e, stackTrace) {
       debugPrint('[DialogMixin] handleJsAlert failed: $e\n$stackTrace');
-      await _recoverDialogState(controller);
       return JsAlertResponse(
         handledByClient: true,
         action: JsAlertResponseAction.CONFIRM,
@@ -424,21 +536,18 @@ return true;
     JsConfirmRequest request,
   ) async {
     try {
-      final result = await _callDialogJs(
-        controller,
-        '''
-return await window.__rainCurtainDialog.showConfirm(${jsonEncode(request.message ?? '')});
-''',
-      );
+      final showConfirm = DialogSyncBridge.instance.showConfirm;
+      final confirmed = showConfirm != null
+          ? await showConfirm(request.message ?? '')
+          : false;
       return JsConfirmResponse(
         handledByClient: true,
-        action: jsBridgeBoolTrue(result)
+        action: confirmed
             ? JsConfirmResponseAction.CONFIRM
             : JsConfirmResponseAction.CANCEL,
       );
     } catch (e, stackTrace) {
       debugPrint('[DialogMixin] handleJsConfirm failed: $e\n$stackTrace');
-      await _recoverDialogState(controller);
       return JsConfirmResponse(
         handledByClient: true,
         action: JsConfirmResponseAction.CANCEL,
@@ -451,25 +560,22 @@ return await window.__rainCurtainDialog.showConfirm(${jsonEncode(request.message
     JsPromptRequest request,
   ) async {
     try {
-      final value = await _callDialogJs(
-        controller,
-        '''
-return await window.__rainCurtainDialog.showPrompt(
-  ${jsonEncode(request.message ?? '')},
-  ${jsonEncode(request.defaultValue ?? '')}
-);
-''',
-      );
+      final showPrompt = DialogSyncBridge.instance.showPrompt;
+      final value = showPrompt != null
+          ? await showPrompt(
+              request.message ?? '',
+              request.defaultValue ?? '',
+            )
+          : null;
       return JsPromptResponse(
         handledByClient: true,
         action: value != null
             ? JsPromptResponseAction.CONFIRM
             : JsPromptResponseAction.CANCEL,
-        value: value?.toString(),
+        value: value,
       );
     } catch (e, stackTrace) {
       debugPrint('[DialogMixin] handleJsPrompt failed: $e\n$stackTrace');
-      await _recoverDialogState(controller);
       return JsPromptResponse(
         handledByClient: true,
         action: JsPromptResponseAction.CANCEL,

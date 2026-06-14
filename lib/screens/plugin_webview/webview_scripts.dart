@@ -463,9 +463,11 @@ class WebViewScripts {
 
     RainCurtainXHR.prototype.send = async function(body) {
       if (!this._intercept) {
-        this._nativeXhr.responseType = this.responseType;
-        this._nativeXhr.timeout = this.timeout;
-        this._nativeXhr.withCredentials = this.withCredentials;
+        if (this._async) {
+          this._nativeXhr.responseType = this.responseType;
+          this._nativeXhr.timeout = this.timeout;
+          this._nativeXhr.withCredentials = this.withCredentials;
+        }
         return this._nativeXhr.send(body);
       }
 
@@ -525,6 +527,7 @@ class WebViewScripts {
     });
 
     window.XMLHttpRequest = RainCurtainXHR;
+    window.__raincurtainNativeXMLHttpRequest = OriginalXHR;
   }
 
   // ===== 拦截 <a download> 点击，转由 Flutter 处理 =====

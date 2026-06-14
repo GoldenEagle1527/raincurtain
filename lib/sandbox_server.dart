@@ -2,6 +2,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:path/path.dart' as p;
+import 'screens/plugin_webview/dialog_sync_bridge.dart';
 
 class SandboxServer {
   final Directory documentRoot;
@@ -34,6 +35,12 @@ class SandboxServer {
         // 检查是否为字体文件请求
         if (path.startsWith('/__raincurtain_fonts__/')) {
           await _serveFontFile(request, path);
+          return;
+        }
+
+        // Windows 同步 JS 弹窗桥接（alert / confirm / prompt）
+        if (path.startsWith('/__raincurtain_dialog/sync/')) {
+          await DialogSyncBridge.instance.handleHttpRequest(request);
           return;
         }
 

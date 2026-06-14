@@ -172,6 +172,7 @@ class PluginWebViewState extends State<PluginWebView>
     disposeFileSystem();
     // 恢复屏幕方向（如果插件锁定了方向）
     disposeOrientation();
+    unregisterDialogBridge();
     // 释放 WebView 控制器引用
     webViewController = null;
     // 释放控制台管理器
@@ -235,7 +236,7 @@ class PluginWebViewState extends State<PluginWebView>
               source: theme.generateThemeJS(Theme.of(context)),
               injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
             ),
-            // 注入 MD3 弹窗组件（alert / confirm / prompt）
+            // 注入 MD3 弹窗组件（供插件直接 await __rainCurtainDialog.* 使用）
             UserScript(
               source: DialogMixin.polyfillJS,
               injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
@@ -265,6 +266,12 @@ class PluginWebViewState extends State<PluginWebView>
             UserScript(
               source: FetchMixin.polyfillJS,
               injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
+            ),
+            // 拦截 alert/confirm/prompt，同步 XHR 桥接 Flutter 对话框（须在 fetch 之后）
+            UserScript(
+              source: DialogMixin.nativeDialogOverrideJS(sandboxServerPort),
+              injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
+              forMainFrameOnly: false,
             ),
             // 注入 WebSocket API 脚本（RainCurtain.ws）
             UserScript(
@@ -364,6 +371,7 @@ class PluginWebViewState extends State<PluginWebView>
           onJsPrompt: handleJsPrompt,
           onWebViewCreated: (controller) {
             webViewController = controller;
+            registerDialogBridge(context);
 
             // 注册各模块 Handler
             registerNotificationHandlers(controller);
